@@ -6,11 +6,10 @@ import datetime
 import html
 import json
 import re
+import traceback
 
 import cgi
 import cgitb
-
-cgitb.enable()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "db_config.json")
@@ -21,6 +20,18 @@ DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 def now_str():
     return datetime.datetime.now().strftime(DATE_FORMAT)
+
+
+def configure_output():
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
+
+
+def setup_cgitb():
+    try:
+        cgitb.enable(display=0, logdir=BASE_DIR)
+    except Exception:
+        cgitb.enable(display=0)
 
 
 def get_connection(db_path):
@@ -59,7 +70,7 @@ def load_config():
     }
 
 
-def init_db(conn, source_table=None, local_table=None, seed_sample_data=True):
+def init_db(conn, source_table=None, local_table=None, should_seed_sample=True):
     cursor = conn.cursor()
     if source_table:
         cursor.execute(
@@ -72,7 +83,7 @@ def init_db(conn, source_table=None, local_table=None, seed_sample_data=True):
             """
         )
         cursor.execute(f"SELECT COUNT(*) FROM {source_table}")
-        if seed_sample_data and cursor.fetchone()[0] == 0:
+        if should_seed_sample and cursor.fetchone()[0] == 0:
             seed_sample_data(cursor, source_table)
 
     if local_table:
@@ -310,12 +321,20 @@ def render_html(rows, message):
     print("</html>")
 
 
-def main():
-    # これを使用しないと日本語が文字化けする
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-    sys.stderr = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+def render_error(message):
+    print("Content-Type: text/html; charset=utf-8\n")
+    print("<!DOCTYPE html>")
+    print("<html lang=\"ja\">")
+    print("<head><meta charset=\"utf-8\"><title>エラー</title></head>")
+    print("<body>")
+    print("<h1>処理中にエラーが発生しました</h1>")
+    print(f"<p>{html.escape(message)}</p>")
+    print("</body></html>")
 
+
+def main():
     form = cgi.FieldStorage()
+
     action = form.getfirst("action", "")
     device_name = form.getfirst("device_name", "")
     condition_name = form.getfirst("condition_name", "")
@@ -329,7 +348,7 @@ def main():
         init_db(
             source_conn,
             source_table=config["source_table"],
-            seed_sample_data=config["seed_sample_data"],
+            should_seed_sample=config["seed_sample_data"],
         )
 
         init_db(local_conn, local_table=config["local_table"])
@@ -348,5 +367,15 @@ def main():
     render_html(local_rows, message)
 
 
+def run():
+    configure_output()
+    setup_cgitb()
+    try:
+        main()
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        render_error("詳細はApacheのerror.logを確認してください。")
+
+
 if __name__ == "__main__":
-    main()
+    run()

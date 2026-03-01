@@ -1,0 +1,24 @@
+#!C:\Path\To\Python\python.exe -u
+# -*- coding: utf-8 -*-
+
+import json
+import os
+import sys
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INDEX_PY = os.path.join(BASE_DIR, "index.py")
+CONFIG_PATH = os.path.join(BASE_DIR, "db_config.json")
+
+
+def load_python_executable():
+    if not os.path.exists(CONFIG_PATH):
+        return None
+    with open(CONFIG_PATH, "r", encoding="utf-8") as file_handle:
+        config = json.load(file_handle)
+    runtime = config.get("runtime", {})
+    return runtime.get("python_executable")
+
+
+if __name__ == "__main__":
+    python_executable = load_python_executable() or sys.executable
+    os.execv(python_executable, [python_executable, INDEX_PY])

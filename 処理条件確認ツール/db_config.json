@@ -9,6 +9,9 @@
     "path": "local.db",
     "table": "local_processing"
   },
+  "runtime": {
+    "python_executable": "C:/Path/To/Python/python.exe"
+  },
   "db": {
     "type": "postgresql",
     "host": "localhost",
