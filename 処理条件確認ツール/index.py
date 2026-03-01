@@ -22,6 +22,17 @@ def now_str():
     return datetime.datetime.now().strftime(DATE_FORMAT)
 
 
+def parse_dt(value):
+    if not value:
+        return None
+    for fmt in (DATE_FORMAT, "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.datetime.strptime(value.strip(), fmt)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def configure_output():
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
@@ -273,6 +284,9 @@ def render_html(rows, message):
             color: var(--muted);
             padding: 24px 0;
         }
+        .stale {
+            background: #ffe9e3;
+        }
         @media (max-width: 720px) {
             th:nth-child(3), td:nth-child(3), th:nth-child(4), td:nth-child(4) {
                 display: none;
@@ -298,7 +312,12 @@ def render_html(rows, message):
             safe_condition = html.escape(condition_name)
             safe_latest = html.escape(latest_processed_at)
             safe_confirmed = html.escape(confirmed_at)
-            print("<tr>")
+            latest_dt = parse_dt(latest_processed_at)
+            confirmed_dt = parse_dt(confirmed_at)
+            row_class = ""
+            if latest_dt and confirmed_dt and confirmed_dt < latest_dt:
+                row_class = " class=\"stale\""
+            print(f"<tr{row_class}>")
             print(f"<td>{safe_device}</td>")
             print(f"<td>{safe_condition}</td>")
             print(f"<td>{safe_latest}</td>")
