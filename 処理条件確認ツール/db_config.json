@@ -1,0 +1,24 @@
+{
+  "source": {
+    "type": "sqlite",
+    "path": "sample_source.db",
+    "table": "source_processing",
+    "seed_sample_data": true
+  },
+  "local": {
+    "path": "local.db",
+    "table": "local_processing"
+  },
+  "db": {
+    "type": "postgresql",
+    "host": "localhost",
+    "port": 5432,
+    "database": "your_database",
+    "user": "your_user",
+    "password": "your_password",
+    "options": {
+      "sslmode": "disable",
+      "connect_timeout": 10
+    }
+  }
+}
