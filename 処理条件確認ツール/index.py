@@ -8,6 +8,11 @@ import json
 import re
 import traceback
 
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None
+
 import cgi
 import cgitb
 
@@ -45,7 +50,28 @@ def setup_cgitb():
         cgitb.enable(display=0)
 
 
-def get_connection(db_path):
+def get_source_connection(config):
+    connect_db = config.get("connect_db", "sqlite")
+    if connect_db == "postgresql":
+        if psycopg2 is None:
+            raise RuntimeError(
+                "connect_db=postgresql が設定されていますが、psycopg2 がインストールされていません。"
+            )
+        db_config = config.get("postgresql", {})
+        options = db_config.get("options") or {}
+        return psycopg2.connect(
+            host=db_config.get("host"),
+            port=db_config.get("port", 5432),
+            dbname=db_config.get("database"),
+            user=db_config.get("user"),
+            password=db_config.get("password"),
+            **options,
+        )
+
+    return sqlite3.connect(config["source_path"])
+
+
+def get_sqlite_connection(db_path):
     return sqlite3.connect(db_path)
 
 
@@ -72,30 +98,39 @@ def load_config():
     local_table = sanitize_table_name(
         local_config.get("table"), DEFAULT_LOCAL_TABLE
     )
+    connect_db = str(config.get("connect_db", "sqlite")).lower()
+    if connect_db not in ("sqlite", "postgresql"):
+        connect_db = "sqlite"
+
+    postgresql_config = config.get("db", {}) if isinstance(config.get("db"), dict) else {}
+
     return {
+        "connect_db": connect_db,
         "source_path": os.path.join(BASE_DIR, source_path),
         "local_path": os.path.join(BASE_DIR, local_path),
         "source_table": source_table,
         "local_table": local_table,
         "seed_sample_data": bool(source_config.get("seed_sample_data", True)),
+        "postgresql": postgresql_config,
     }
 
 
-def init_db(conn, source_table=None, local_table=None, should_seed_sample=True):
+def init_db(conn, source_table=None, local_table=None, should_seed_sample=True, connect_db="sqlite"):
     cursor = conn.cursor()
     if source_table:
-        cursor.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {source_table} (
-                device_name TEXT NOT NULL,
-                condition_name TEXT NOT NULL,
-                processed_at TEXT NOT NULL
+        if connect_db == "sqlite":
+            cursor.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {source_table} (
+                    device_name TEXT NOT NULL,
+                    condition_name TEXT NOT NULL,
+                    processed_at TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        cursor.execute(f"SELECT COUNT(*) FROM {source_table}")
-        if should_seed_sample and cursor.fetchone()[0] == 0:
-            seed_sample_data(cursor, source_table)
+            cursor.execute(f"SELECT COUNT(*) FROM {source_table}")
+            if should_seed_sample and cursor.fetchone()[0] == 0:
+                seed_sample_data(cursor, source_table)
 
     if local_table:
         cursor.execute(
@@ -358,16 +393,17 @@ def main():
     device_name = form.getfirst("device_name", "")
     condition_name = form.getfirst("condition_name", "")
 
-    message = "SQLiteサンプルDBを作成し、最新処理日時を取得しています。"
+    message = "最新処理日時を取得しています。"
 
     config = load_config()
-    source_conn = get_connection(config["source_path"])
-    local_conn = get_connection(config["local_path"])
+    source_conn = get_source_connection(config)
+    local_conn = get_sqlite_connection(config["local_path"])
     try:
         init_db(
             source_conn,
             source_table=config["source_table"],
             should_seed_sample=config["seed_sample_data"],
+            connect_db=config["connect_db"],
         )
 
         init_db(local_conn, local_table=config["local_table"])
