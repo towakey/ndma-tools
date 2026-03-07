@@ -15,6 +15,7 @@ import cgitb
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "app.db")
 EXPORT_DIR = os.path.join(BASE_DIR, "exports")
+SAMPLES_DIR = os.path.join(BASE_DIR, "samples")
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 STATIC_FILES = {
     "app.css": ("text/css; charset=utf-8", "app.css"),
@@ -227,6 +228,45 @@ def get_datasets(conn):
     return cursor.fetchall()
 
 
+def seed_samples_if_needed(conn):
+    datasets = get_datasets(conn)
+    if datasets:
+        return False
+    if not os.path.exists(SAMPLES_DIR):
+        return False
+
+    sample_files = []
+    for name in sorted(os.listdir(SAMPLES_DIR)):
+        if not name.lower().endswith(".csv"):
+            continue
+        sample_files.append(os.path.join(SAMPLES_DIR, name))
+
+    if not sample_files:
+        return False
+
+    for sample_path in sample_files:
+        with open(sample_path, "rb") as file_handle:
+            raw_bytes = file_handle.read()
+        encoding = detect_encoding(raw_bytes)
+        text = raw_bytes.decode(encoding)
+        reader = csv.reader(io.StringIO(text))
+        rows = list(reader)
+        if not rows:
+            continue
+        headers = [value.strip() or "列{0}".format(index + 1) for index, value in enumerate(rows[0])]
+        data_rows = rows[1:]
+        dataset_name = os.path.splitext(os.path.basename(sample_path))[0]
+        create_dataset(
+            conn,
+            dataset_name,
+            os.path.basename(sample_path),
+            encoding,
+            headers,
+            data_rows,
+        )
+    return True
+
+
 def get_dataset_fields(conn):
     cursor = conn.cursor()
     cursor.execute(
@@ -342,6 +382,19 @@ def create_relation(conn, left_field_id, right_field_id):
         (left_dataset_id, left_field_id, right_dataset_id, right_field_id, now_str()),
     )
     conn.commit()
+
+
+def create_relations_bulk(conn, relation_pairs):
+    created_count = 0
+    for left_field_id, right_field_id in relation_pairs:
+        try:
+            create_relation(conn, left_field_id, right_field_id)
+            created_count += 1
+        except ValueError as exc:
+            if str(exc) == "同じ関連付けは既に登録されています。":
+                continue
+            raise
+    return created_count
 
 
 def delete_relation(conn, relation_id):
@@ -634,16 +687,24 @@ def render_relation_page(conn, message="", level="info"):
     render_flash(message, level)
 
     print("<section class=\"panel\">")
-    print("<div class=\"panel-head\"><h2>ノードベース連携</h2><span>列をクリックして関連付け</span></div>")
+    print("<div class=\"panel-head\"><h2>ノードベース連携</h2><span>ヘッダーで移動 / 項目をドラッグして接続</span></div>")
     print("<div class=\"builder\">")
     print("<aside class=\"builder-side\">")
     print("<form method=\"post\" id=\"relation-form\" class=\"stack\">")
-    print("<input type=\"hidden\" name=\"action\" value=\"create_relation\">")
+    print("<input type=\"hidden\" name=\"action\" value=\"create_relations_bulk\">")
     print("<input type=\"hidden\" name=\"left_field_id\" id=\"left-field-id\">")
     print("<input type=\"hidden\" name=\"right_field_id\" id=\"right-field-id\">")
+    print("<input type=\"hidden\" name=\"pending_relations\" id=\"pending-relations\" value=\"[]\">")
     print("<label>左側の列<input type=\"text\" id=\"left-field-label\" readonly placeholder=\"未選択\"></label>")
     print("<label>右側の列<input type=\"text\" id=\"right-field-label\" readonly placeholder=\"未選択\"></label>")
-    print("<button class=\"btn primary\" type=\"submit\">関連付けを保存</button>")
+    print("<p class=\"helper-text\">項目をドラッグして別ノードの項目へドロップするか、2項目をクリックして未保存一覧へ追加します。</p>")
+    print("<button class=\"btn\" type=\"button\" id=\"stage-relation-btn\">未保存一覧に追加</button>")
+    print("<div class=\"pending-box\">")
+    print("<div class=\"pending-head\"><strong>未保存の関連付け</strong><button class=\"btn danger\" type=\"button\" id=\"clear-pending-btn\">クリア</button></div>")
+    print("<div id=\"pending-relations-empty\" class=\"empty\">未保存の関連付けはありません。</div>")
+    print("<div id=\"pending-relations-list\" class=\"pending-list\"></div>")
+    print("</div>")
+    print("<button class=\"btn primary\" type=\"submit\" id=\"save-pending-btn\">まとめて保存</button>")
     print("</form>")
     print("<form method=\"post\" class=\"stack\">")
     print("<input type=\"hidden\" name=\"action\" value=\"save_template\">")
@@ -668,13 +729,14 @@ def render_relation_page(conn, message="", level="info"):
     for index, dataset in enumerate(datasets):
         left = x_positions[index % len(x_positions)]
         top = 24 + (index // len(x_positions)) * 340
-        print("<section class=\"node\" data-dataset-id=\"{0}\" style=\"left:{1}px;top:{2}px\">".format(dataset["id"], left, top))
-        print("<header>{0}</header>".format(html_escape(dataset["name"])))
+        print("<section class=\"node\" data-dataset-id=\"{0}\" data-default-left=\"{1}\" data-default-top=\"{2}\" style=\"left:{1}px;top:{2}px\">".format(dataset["id"], left, top))
+        print("<header class=\"node-header\"><span>{0}</span><span class=\"node-handle\">移動</span></header>".format(html_escape(dataset["name"])))
         print("<div class=\"node-body\">")
         for field in fields_by_dataset.get(dataset["id"], []):
             label = "{0}.{1}".format(dataset["name"], field["display_name"])
             print(
-                "<button type=\"button\" class=\"field-pin\" data-field-id=\"{0}\" data-label=\"{1}\">{2}</button>".format(
+                "<button type=\"button\" class=\"field-pin\" draggable=\"true\" data-dataset-id=\"{0}\" data-field-id=\"{1}\" data-label=\"{2}\">{3}</button>".format(
+                    dataset["id"],
                     field["id"],
                     html_escape(label),
                     html_escape(field["display_name"]),
@@ -802,6 +864,25 @@ def handle_post(conn, form):
         create_relation(conn, left_field_id, right_field_id)
         return "relations", "関連付けを保存しました。", "success"
 
+    if action == "create_relations_bulk":
+        pending_relations_raw = form.getfirst("pending_relations", "[]")
+        try:
+            pending_relations = json.loads(pending_relations_raw)
+        except ValueError:
+            pending_relations = []
+        relation_pairs = []
+        for item in pending_relations:
+            if not isinstance(item, dict):
+                continue
+            left_field_id = int(item.get("leftFieldId", 0) or 0)
+            right_field_id = int(item.get("rightFieldId", 0) or 0)
+            if left_field_id and right_field_id:
+                relation_pairs.append((left_field_id, right_field_id))
+        if not relation_pairs:
+            raise ValueError("保存する未保存の関連付けがありません。")
+        created_count = create_relations_bulk(conn, relation_pairs)
+        return "relations", "関連付けをまとめて保存しました。{0} 件追加しました。".format(created_count), "success"
+
     if action == "delete_relation":
         relation_id = int(form.getfirst("relation_id", "0"))
         delete_relation(conn, relation_id)
@@ -832,6 +913,7 @@ def main():
     ensure_dirs()
     conn = get_connection()
     init_db(conn)
+    seed_samples_if_needed(conn)
     form = parse_form()
     page = form.getfirst("page", "upload")
     asset = form.getfirst("asset", "")
