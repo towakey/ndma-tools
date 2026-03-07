@@ -96,6 +96,34 @@
         }
     }
 
+    function deactivateDataset(datasetId) {
+        datasetId = String(datasetId);
+        activeDatasetIds = activeDatasetIds.filter(function (value) {
+            return String(value) !== datasetId;
+        });
+        pendingRelations = pendingRelations.filter(function (relation) {
+            var leftNode = getNodeByFieldId(relation.leftFieldId);
+            var rightNode = getNodeByFieldId(relation.rightFieldId);
+            if (!leftNode || !rightNode) {
+                return false;
+            }
+            return leftNode.dataset.datasetId !== datasetId && rightNode.dataset.datasetId !== datasetId;
+        });
+        previewRelation = null;
+        saveActiveDatasets();
+        syncActiveNodes();
+        renderPendingRelations();
+    }
+
+    function getNodeByFieldId(fieldId) {
+        var stage = getStage();
+        if (!stage) {
+            return null;
+        }
+        var target = stage.querySelector('[data-field-id="' + fieldId + '"]');
+        return target ? target.closest(".node") : null;
+    }
+
     function parseRelationData() {
         var element = document.getElementById("relation-data");
         if (!element) {
@@ -537,6 +565,20 @@
         });
     }
 
+    function initNodeRemoveActions() {
+        var stage = getStage();
+        if (!stage) {
+            return;
+        }
+        stage.querySelectorAll(".node-remove-btn").forEach(function (button) {
+            button.addEventListener("click", function (event) {
+                deactivateDataset(button.dataset.removeDatasetId || "");
+                event.preventDefault();
+                event.stopPropagation();
+            });
+        });
+    }
+
     function initCanvasZoom() {
         var canvas = getCanvas();
         if (!canvas) {
@@ -576,6 +618,7 @@
         initPendingRelationActions();
         initFieldDragConnect();
         initDatasetPalette();
+        initNodeRemoveActions();
         renderRelations();
         window.addEventListener("resize", renderRelations);
         var canvas = document.getElementById("relation-canvas");

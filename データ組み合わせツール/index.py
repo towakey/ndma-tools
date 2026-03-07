@@ -751,7 +751,7 @@ def render_relation_page(conn, message="", level="info"):
         left = x_positions[index % len(x_positions)]
         top = 24 + (index // len(x_positions)) * 340
         print("<section class=\"node is-hidden\" data-dataset-id=\"{0}\" data-default-left=\"{1}\" data-default-top=\"{2}\" style=\"left:{1}px;top:{2}px\">".format(dataset["id"], left, top))
-        print("<header class=\"node-header\"><span>{0}</span><span class=\"node-handle\">移動</span></header>".format(html_escape(dataset["name"])))
+        print("<header class=\"node-header\"><span>{0}</span><span class=\"node-header-actions\"><button type=\"button\" class=\"node-remove-btn\" data-remove-dataset-id=\"{1}\">外す</button><span class=\"node-handle\">移動</span></span></header>".format(html_escape(dataset["name"]), dataset["id"]))
         print("<div class=\"node-body\">")
         for field in fields_by_dataset.get(dataset["id"], []):
             label = "{0}.{1}".format(dataset["name"], field["display_name"])

@@ -397,6 +397,22 @@ th {
     background: linear-gradient(180deg, #f9fbff, #f1f6ff);
 }
 
+.node-header-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.node-remove-btn {
+    border: 1px solid #d8e1f2;
+    border-radius: 999px;
+    background: #ffffff;
+    color: #5f6f94;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
 .node.is-dragging .node-header {
     cursor: grabbing;
 }
