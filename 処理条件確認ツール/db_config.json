@@ -1,4 +1,5 @@
 {
+  "connect_db": "sqlite",
   "source": {
     "type": "sqlite",
     "path": "sample_source.db",
