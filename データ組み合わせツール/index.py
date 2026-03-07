@@ -723,7 +723,18 @@ def render_relation_page(conn, message="", level="info"):
     print("</form>")
     print("</aside>")
 
+    print("<div class=\"builder-main\">")
+    print("<div class=\"builder-toolbar\">")
+    print("<span class=\"helper-text\">ホイールまたはボタンで表示倍率を変更できます。</span>")
+    print("<div class=\"zoom-controls\">")
+    print("<button class=\"btn\" type=\"button\" id=\"zoom-out-btn\">-</button>")
+    print("<button class=\"btn\" type=\"button\" id=\"zoom-reset-btn\">100%</button>")
+    print("<button class=\"btn\" type=\"button\" id=\"zoom-in-btn\">+</button>")
+    print("<span class=\"zoom-status\" id=\"zoom-status\">100%</span>")
+    print("</div>")
+    print("</div>")
     print("<div class=\"builder-canvas\" id=\"relation-canvas\">")
+    print("<div class=\"builder-stage\" id=\"relation-stage\">")
     print("<svg class=\"relation-svg\" id=\"relation-svg\"></svg>")
     x_positions = [40, 420, 800]
     for index, dataset in enumerate(datasets):
@@ -745,11 +756,6 @@ def render_relation_page(conn, message="", level="info"):
         print("</div></section>")
     print("</div>")
     print("</div>")
-    print("</section>")
-
-    print("<section class=\"panel two-col\">")
-    print("<div>")
-    print("<div class=\"panel-head\"><h2>保存済み関連付け</h2><span>{0} 件</span></div>".format(len(relations)))
     if relations:
         print("<div class=\"table-wrap\"><table><thead><tr><th>ID</th><th>関連</th><th>操作</th></tr></thead><tbody>")
         for relation in relations:

@@ -246,6 +246,31 @@ th {
     gap: 16px;
 }
 
+.builder-main {
+    display: grid;
+    gap: 12px;
+}
+
+.builder-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+}
+
+.zoom-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.zoom-status {
+    min-width: 56px;
+    text-align: right;
+    color: #34508f;
+    font-weight: 700;
+}
+
 .helper-text {
     margin: 0;
     color: var(--muted);
@@ -299,6 +324,13 @@ th {
     border: 1px solid var(--line);
     border-radius: 16px;
     background: radial-gradient(circle at top left, #f9fbff, #edf3ff);
+}
+
+.builder-stage {
+    position: relative;
+    min-width: 100%;
+    min-height: 680px;
+    transform-origin: top left;
 }
 
 .node {

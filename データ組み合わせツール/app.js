@@ -2,6 +2,15 @@
     var previewRelation = null;
     var currentSelection = [];
     var pendingRelations = [];
+    var zoomScale = 1;
+
+    function getStage() {
+        return document.getElementById("relation-stage");
+    }
+
+    function getCanvas() {
+        return document.getElementById("relation-canvas");
+    }
 
     function parseRelationData() {
         var element = document.getElementById("relation-data");
@@ -20,12 +29,32 @@
         if (!target) {
             return null;
         }
-        var containerRect = container.getBoundingClientRect();
+        var stage = getStage();
+        var containerRect = stage ? stage.getBoundingClientRect() : container.getBoundingClientRect();
         var rect = target.getBoundingClientRect();
         return {
-            x: rect.left - containerRect.left + container.scrollLeft + rect.width / 2,
-            y: rect.top - containerRect.top + container.scrollTop + rect.height / 2
+            x: (rect.left - containerRect.left) / zoomScale + rect.width / zoomScale / 2,
+            y: (rect.top - containerRect.top) / zoomScale + rect.height / zoomScale / 2
         };
+    }
+
+    function updateZoomUi() {
+        var status = document.getElementById("zoom-status");
+        var stage = getStage();
+        if (status) {
+            status.textContent = Math.round(zoomScale * 100) + "%";
+        }
+        if (stage) {
+            stage.style.transform = "scale(" + zoomScale + ")";
+            stage.style.width = Math.max(100, 100 / zoomScale) + "%";
+            stage.style.height = Math.max(680, 680 / zoomScale) + "px";
+        }
+        renderRelations();
+    }
+
+    function setZoom(nextScale) {
+        zoomScale = Math.min(2, Math.max(0.5, nextScale));
+        updateZoomUi();
     }
 
     function drawPath(svg, start, end, cssClassName) {
@@ -45,13 +74,14 @@
     }
 
     function renderRelations() {
-        var canvas = document.getElementById("relation-canvas");
+        var canvas = getCanvas();
+        var stage = getStage();
         var svg = document.getElementById("relation-svg");
-        if (!canvas || !svg) {
+        if (!canvas || !svg || !stage) {
             return;
         }
-        var width = Math.max(canvas.clientWidth, canvas.scrollWidth);
-        var height = Math.max(canvas.clientHeight, canvas.scrollHeight);
+        var width = Math.max(stage.scrollWidth, stage.offsetWidth);
+        var height = Math.max(stage.scrollHeight, stage.offsetHeight);
         svg.innerHTML = "";
         svg.style.width = width + "px";
         svg.style.height = height + "px";
@@ -266,11 +296,12 @@
     }
 
     function initNodeDragging() {
-        var canvas = document.getElementById("relation-canvas");
-        if (!canvas) {
+        var canvas = getCanvas();
+        var stage = getStage();
+        if (!canvas || !stage) {
             return;
         }
-        loadNodePositions(canvas);
+        loadNodePositions(stage);
         var activeNode = null;
         var offsetX = 0;
         var offsetY = 0;
@@ -279,9 +310,9 @@
             if (!activeNode) {
                 return;
             }
-            var canvasRect = canvas.getBoundingClientRect();
-            var left = event.clientX - canvasRect.left + canvas.scrollLeft - offsetX;
-            var top = event.clientY - canvasRect.top + canvas.scrollTop - offsetY;
+            var stageRect = stage.getBoundingClientRect();
+            var left = (event.clientX - stageRect.left) / zoomScale - offsetX;
+            var top = (event.clientY - stageRect.top) / zoomScale - offsetY;
             left = Math.max(0, left);
             top = Math.max(0, top);
             activeNode.style.left = left + "px";
@@ -294,13 +325,13 @@
                 return;
             }
             activeNode.classList.remove("is-dragging");
-            saveNodePositions(canvas);
+            saveNodePositions(stage);
             activeNode = null;
             document.removeEventListener("mousemove", onMove);
             document.removeEventListener("mouseup", onUp);
         }
 
-        canvas.querySelectorAll(".node").forEach(function (node) {
+        stage.querySelectorAll(".node").forEach(function (node) {
             var handle = node.querySelector(".node-header");
             if (!handle) {
                 return;
@@ -310,9 +341,11 @@
                     return;
                 }
                 activeNode = node;
-                var nodeRect = node.getBoundingClientRect();
-                offsetX = event.clientX - nodeRect.left;
-                offsetY = event.clientY - nodeRect.top;
+                var nodeLeft = parseFloat(node.style.left || "0");
+                var nodeTop = parseFloat(node.style.top || "0");
+                var stageRect = stage.getBoundingClientRect();
+                offsetX = (event.clientX - stageRect.left) / zoomScale - nodeLeft;
+                offsetY = (event.clientY - stageRect.top) / zoomScale - nodeTop;
                 activeNode.classList.add("is-dragging");
                 document.addEventListener("mousemove", onMove);
                 document.addEventListener("mouseup", onUp);
@@ -323,11 +356,12 @@
     }
 
     function initFieldDragConnect() {
-        var canvas = document.getElementById("relation-canvas");
-        if (!canvas) {
+        var canvas = getCanvas();
+        var stage = getStage();
+        if (!canvas || !stage) {
             return;
         }
-        var buttons = canvas.querySelectorAll(".field-pin");
+        var buttons = stage.querySelectorAll(".field-pin");
         if (!buttons.length) {
             return;
         }
@@ -400,12 +434,12 @@
             }
             event.preventDefault();
             var start = getFieldCenter(canvas, dragSource.dataset.fieldId);
-            var rect = canvas.getBoundingClientRect();
+            var rect = stage.getBoundingClientRect();
             previewRelation = start ? {
                 start: start,
                 end: {
-                    x: event.clientX - rect.left + canvas.scrollLeft,
-                    y: event.clientY - rect.top + canvas.scrollTop
+                    x: (event.clientX - rect.left) / zoomScale,
+                    y: (event.clientY - rect.top) / zoomScale
                 }
             } : null;
             renderRelations();
@@ -416,7 +450,41 @@
         });
     }
 
+    function initCanvasZoom() {
+        var canvas = getCanvas();
+        if (!canvas) {
+            return;
+        }
+        var zoomIn = document.getElementById("zoom-in-btn");
+        var zoomOut = document.getElementById("zoom-out-btn");
+        var zoomReset = document.getElementById("zoom-reset-btn");
+        if (zoomIn) {
+            zoomIn.addEventListener("click", function () {
+                setZoom(zoomScale + 0.1);
+            });
+        }
+        if (zoomOut) {
+            zoomOut.addEventListener("click", function () {
+                setZoom(zoomScale - 0.1);
+            });
+        }
+        if (zoomReset) {
+            zoomReset.addEventListener("click", function () {
+                setZoom(1);
+            });
+        }
+        canvas.addEventListener("wheel", function (event) {
+            if (event.target && event.target.closest(".builder-side")) {
+                return;
+            }
+            event.preventDefault();
+            setZoom(zoomScale + (event.deltaY < 0 ? 0.1 : -0.1));
+        }, { passive: false });
+        updateZoomUi();
+    }
+
     window.addEventListener("load", function () {
+        initCanvasZoom();
         initNodeDragging();
         initFieldSelection();
         initFieldDragConnect();
