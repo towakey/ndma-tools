@@ -279,7 +279,7 @@ def get_dataset_fields(conn):
     return cursor.fetchall()
 
 
-def get_dataset_samples(conn, limit_per_dataset=5):
+def get_dataset_samples(conn, limit_per_dataset=3):
     datasets = get_datasets(conn)
     fields = get_dataset_fields(conn)
     field_map = {}
@@ -655,6 +655,7 @@ def render_upload_page(conn, message="", level="info"):
             print("<span class=\"field-chip\">{0}</span>".format(html_escape(field["display_name"])))
         print("</div>")
         if sample_rows:
+            print("<div class=\"dataset-preview-meta\">先頭 {0} 行を表示 / 全 {1} 行</div>".format(len(sample_rows), dataset["row_count"]))
             print("<div class=\"table-wrap\"><table><thead><tr>")
             for field in dataset_fields:
                 print("<th>{0}</th>".format(html_escape(field["display_name"])))
@@ -665,6 +666,8 @@ def render_upload_page(conn, message="", level="info"):
                     print("<td>{0}</td>".format(html_escape(sample_row[field["field_key"]])))
                 print("</tr>")
             print("</tbody></table></div>")
+        else:
+            print("<div class=\"dataset-preview-meta\">データ行はありません。</div>")
         print("</article>")
     print("</section>")
     print("</main>")

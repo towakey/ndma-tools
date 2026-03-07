@@ -211,6 +211,13 @@ select[multiple] {
     overflow-x: auto;
 }
 
+.dataset-preview-meta {
+    margin-top: 10px;
+    margin-bottom: 8px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
 table {
     width: 100%;
     border-collapse: collapse;
@@ -218,11 +225,11 @@ table {
 
 th,
 td {
-    padding: 10px 12px;
+    padding: 8px 10px;
     text-align: left;
     border-bottom: 1px solid #e6ebf2;
     vertical-align: top;
-    font-size: 14px;
+    font-size: 13px;
 }
 
 th {
