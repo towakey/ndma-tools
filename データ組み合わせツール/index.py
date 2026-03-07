@@ -692,13 +692,8 @@ def render_relation_page(conn, message="", level="info"):
     print("<aside class=\"builder-side\">")
     print("<form method=\"post\" id=\"relation-form\" class=\"stack\">")
     print("<input type=\"hidden\" name=\"action\" value=\"create_relations_bulk\">")
-    print("<input type=\"hidden\" name=\"left_field_id\" id=\"left-field-id\">")
-    print("<input type=\"hidden\" name=\"right_field_id\" id=\"right-field-id\">")
     print("<input type=\"hidden\" name=\"pending_relations\" id=\"pending-relations\" value=\"[]\">")
-    print("<label>左側の列<input type=\"text\" id=\"left-field-label\" readonly placeholder=\"未選択\"></label>")
-    print("<label>右側の列<input type=\"text\" id=\"right-field-label\" readonly placeholder=\"未選択\"></label>")
-    print("<p class=\"helper-text\">項目をドラッグして別ノードの項目へドロップするか、2項目をクリックして未保存一覧へ追加します。</p>")
-    print("<button class=\"btn\" type=\"button\" id=\"stage-relation-btn\">未保存一覧に追加</button>")
+    print("<p class=\"helper-text\">項目をドラッグして別ノードの項目へドロップすると、未保存一覧へ追加されます。</p>")
     print("<div class=\"pending-box\">")
     print("<div class=\"pending-head\"><strong>未保存の関連付け</strong><button class=\"btn danger\" type=\"button\" id=\"clear-pending-btn\">クリア</button></div>")
     print("<div id=\"pending-relations-empty\" class=\"empty\">未保存の関連付けはありません。</div>")
@@ -733,6 +728,18 @@ def render_relation_page(conn, message="", level="info"):
     print("<span class=\"zoom-status\" id=\"zoom-status\">100%</span>")
     print("</div>")
     print("</div>")
+    print("<div class=\"dataset-palette\">")
+    print("<div class=\"panel-head\"><h3>利用可能なデータテーブル</h3><span>ドラッグして追加</span></div>")
+    print("<div class=\"dataset-palette-list\" id=\"dataset-palette-list\">")
+    for dataset in datasets:
+        print(
+            "<button type=\"button\" class=\"dataset-chip\" draggable=\"true\" data-dataset-source-id=\"{0}\">{1}</button>".format(
+                dataset["id"],
+                html_escape(dataset["name"]),
+            )
+        )
+    print("</div>")
+    print("</div>")
     print("<div class=\"builder-canvas\" id=\"relation-canvas\">")
     print("<div class=\"builder-stage\" id=\"relation-stage\">")
     print("<svg class=\"relation-svg\" id=\"relation-svg\"></svg>")
@@ -740,7 +747,7 @@ def render_relation_page(conn, message="", level="info"):
     for index, dataset in enumerate(datasets):
         left = x_positions[index % len(x_positions)]
         top = 24 + (index // len(x_positions)) * 340
-        print("<section class=\"node\" data-dataset-id=\"{0}\" data-default-left=\"{1}\" data-default-top=\"{2}\" style=\"left:{1}px;top:{2}px\">".format(dataset["id"], left, top))
+        print("<section class=\"node is-hidden\" data-dataset-id=\"{0}\" data-default-left=\"{1}\" data-default-top=\"{2}\" style=\"left:{1}px;top:{2}px\">".format(dataset["id"], left, top))
         print("<header class=\"node-header\"><span>{0}</span><span class=\"node-handle\">移動</span></header>".format(html_escape(dataset["name"])))
         print("<div class=\"node-body\">")
         for field in fields_by_dataset.get(dataset["id"], []):
@@ -754,6 +761,7 @@ def render_relation_page(conn, message="", level="info"):
                 )
             )
         print("</div></section>")
+    print("</div>")
     print("</div>")
     print("</div>")
     if relations:

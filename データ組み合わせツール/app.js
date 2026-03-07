@@ -1,8 +1,8 @@
 (function () {
     var previewRelation = null;
-    var currentSelection = [];
     var pendingRelations = [];
     var zoomScale = 1;
+    var activeDatasetIds = [];
 
     function getStage() {
         return document.getElementById("relation-stage");
@@ -10,6 +10,90 @@
 
     function getCanvas() {
         return document.getElementById("relation-canvas");
+    }
+
+    function getNode(datasetId) {
+        var stage = getStage();
+        if (!stage) {
+            return null;
+        }
+        return stage.querySelector('.node[data-dataset-id="' + datasetId + '"]');
+    }
+
+    function getActiveDatasetStorageKey() {
+        return "data-link-tool-active-datasets:" + window.location.pathname;
+    }
+
+    function saveActiveDatasets() {
+        try {
+            window.localStorage.setItem(getActiveDatasetStorageKey(), JSON.stringify(activeDatasetIds));
+        } catch (error) {
+        }
+    }
+
+    function loadActiveDatasets() {
+        var raw = "";
+        try {
+            raw = window.localStorage.getItem(getActiveDatasetStorageKey()) || "";
+        } catch (error) {
+            raw = "";
+        }
+        if (!raw) {
+            activeDatasetIds = [];
+            return;
+        }
+        try {
+            activeDatasetIds = JSON.parse(raw) || [];
+        } catch (error) {
+            activeDatasetIds = [];
+        }
+    }
+
+    function syncDatasetPalette() {
+        var palette = document.getElementById("dataset-palette-list");
+        if (!palette) {
+            return;
+        }
+        var chips = palette.querySelectorAll(".dataset-chip");
+        chips.forEach(function (chip) {
+            var isActive = activeDatasetIds.indexOf(String(chip.dataset.datasetSourceId)) !== -1;
+            chip.style.display = isActive ? "none" : "inline-flex";
+        });
+    }
+
+    function syncActiveNodes() {
+        var stage = getStage();
+        if (!stage) {
+            return;
+        }
+        var nodes = stage.querySelectorAll(".node");
+        nodes.forEach(function (node) {
+            var isActive = activeDatasetIds.indexOf(String(node.dataset.datasetId)) !== -1;
+            node.classList.toggle("is-hidden", !isActive);
+        });
+        syncDatasetPalette();
+        renderRelations();
+    }
+
+    function activateDataset(datasetId, left, top) {
+        datasetId = String(datasetId);
+        if (activeDatasetIds.indexOf(datasetId) === -1) {
+            activeDatasetIds.push(datasetId);
+        }
+        var node = getNode(datasetId);
+        if (node) {
+            if (typeof left === "number") {
+                node.style.left = Math.max(0, left) + "px";
+            }
+            if (typeof top === "number") {
+                node.style.top = Math.max(0, top) + "px";
+            }
+        }
+        saveActiveDatasets();
+        syncActiveNodes();
+        if (node) {
+            saveNodePositions(getStage());
+        }
     }
 
     function parseRelationData() {
@@ -27,6 +111,10 @@
     function getFieldCenter(container, fieldId) {
         var target = container.querySelector('[data-field-id="' + fieldId + '"]');
         if (!target) {
+            return null;
+        }
+        var node = target.closest(".node");
+        if (node && node.classList.contains("is-hidden")) {
             return null;
         }
         var stage = getStage();
@@ -108,25 +196,6 @@
         }
     }
 
-    function applySelection(selected) {
-        currentSelection = selected.slice(0, 2);
-        var buttons = document.querySelectorAll(".field-pin");
-        var leftId = document.getElementById("left-field-id");
-        var rightId = document.getElementById("right-field-id");
-        var leftLabel = document.getElementById("left-field-label");
-        var rightLabel = document.getElementById("right-field-label");
-        buttons.forEach(function (button) {
-            button.classList.remove("is-selected");
-        });
-        selected.forEach(function (button) {
-            button.classList.add("is-selected");
-        });
-        leftId.value = selected[0] ? selected[0].dataset.fieldId : "";
-        rightId.value = selected[1] ? selected[1].dataset.fieldId : "";
-        leftLabel.value = selected[0] ? selected[0].dataset.label : "";
-        rightLabel.value = selected[1] ? selected[1].dataset.label : "";
-    }
-
     function syncPendingRelationsInput() {
         var input = document.getElementById("pending-relations");
         if (input) {
@@ -195,46 +264,7 @@
         return true;
     }
 
-    function initFieldSelection() {
-        var buttons = document.querySelectorAll(".field-pin");
-        if (!buttons.length) {
-            return;
-        }
-        var selected = [];
-
-        buttons.forEach(function (button) {
-            button.addEventListener("click", function () {
-                if (selected.length === 2) {
-                    selected = [];
-                }
-                var exists = selected.some(function (item) {
-                    return item === button;
-                });
-                if (exists) {
-                    selected = selected.filter(function (item) {
-                        return item !== button;
-                    });
-                } else {
-                    selected.push(button);
-                }
-                applySelection(selected);
-            });
-        });
-        applySelection(selected);
-
-        var stageButton = document.getElementById("stage-relation-btn");
-        if (stageButton) {
-            stageButton.addEventListener("click", function () {
-                if (currentSelection.length !== 2) {
-                    return;
-                }
-                if (addPendingRelation(currentSelection[0], currentSelection[1])) {
-                    applySelection([]);
-                    selected = [];
-                }
-            });
-        }
-
+    function initPendingRelationActions() {
         var clearButton = document.getElementById("clear-pending-btn");
         if (clearButton) {
             clearButton.addEventListener("click", function () {
@@ -301,7 +331,9 @@
         if (!canvas || !stage) {
             return;
         }
+        loadActiveDatasets();
         loadNodePositions(stage);
+        syncActiveNodes();
         var activeNode = null;
         var offsetX = 0;
         var offsetY = 0;
@@ -337,6 +369,9 @@
                 return;
             }
             handle.addEventListener("mousedown", function (event) {
+                if (node.classList.contains("is-hidden")) {
+                    return;
+                }
                 if (event.button !== 0) {
                     return;
                 }
@@ -419,7 +454,6 @@
                 }
                 event.preventDefault();
                 addPendingRelation(dragSource, button);
-                applySelection([]);
                 clearDragState();
             });
 
@@ -447,6 +481,59 @@
 
         canvas.addEventListener("drop", function () {
             clearDragState();
+        });
+    }
+
+    function initDatasetPalette() {
+        var canvas = getCanvas();
+        var stage = getStage();
+        var palette = document.getElementById("dataset-palette-list");
+        if (!canvas || !stage || !palette) {
+            return;
+        }
+        var draggingDatasetId = "";
+
+        palette.querySelectorAll(".dataset-chip").forEach(function (chip) {
+            chip.addEventListener("dragstart", function (event) {
+                draggingDatasetId = String(chip.dataset.datasetSourceId || "");
+                if (event.dataTransfer) {
+                    event.dataTransfer.effectAllowed = "copy";
+                    event.dataTransfer.setData("text/plain", draggingDatasetId);
+                }
+            });
+            chip.addEventListener("dragend", function () {
+                draggingDatasetId = "";
+                canvas.classList.remove("is-drop-active");
+            });
+        });
+
+        canvas.addEventListener("dragover", function (event) {
+            if (!draggingDatasetId) {
+                return;
+            }
+            event.preventDefault();
+            canvas.classList.add("is-drop-active");
+        });
+
+        canvas.addEventListener("dragleave", function (event) {
+            if (event.target === canvas) {
+                canvas.classList.remove("is-drop-active");
+            }
+        });
+
+        canvas.addEventListener("drop", function (event) {
+            if (!draggingDatasetId) {
+                return;
+            }
+            event.preventDefault();
+            canvas.classList.remove("is-drop-active");
+            var rect = stage.getBoundingClientRect();
+            activateDataset(
+                draggingDatasetId,
+                (event.clientX - rect.left) / zoomScale - 140,
+                (event.clientY - rect.top) / zoomScale - 28
+            );
+            draggingDatasetId = "";
         });
     }
 
@@ -486,8 +573,9 @@
     window.addEventListener("load", function () {
         initCanvasZoom();
         initNodeDragging();
-        initFieldSelection();
+        initPendingRelationActions();
         initFieldDragConnect();
+        initDatasetPalette();
         renderRelations();
         window.addEventListener("resize", renderRelations);
         var canvas = document.getElementById("relation-canvas");
