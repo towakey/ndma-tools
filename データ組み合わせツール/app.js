@@ -136,6 +136,50 @@
         }
     }
 
+    function parseEditingTemplateRelations() {
+        var element = document.getElementById("editing-template-relations");
+        if (!element) {
+            return [];
+        }
+        try {
+            return JSON.parse(element.textContent || "[]");
+        } catch (error) {
+            return [];
+        }
+    }
+
+    function ensurePendingRelationNodes() {
+        pendingRelations.forEach(function (relation) {
+            var leftNode = getNodeByFieldId(relation.leftFieldId);
+            var rightNode = getNodeByFieldId(relation.rightFieldId);
+            if (leftNode) {
+                activateDataset(leftNode.dataset.datasetId);
+            }
+            if (rightNode) {
+                activateDataset(rightNode.dataset.datasetId);
+            }
+        });
+    }
+
+    function initEditingTemplateRelations() {
+        var editingRelations = parseEditingTemplateRelations();
+        if (!editingRelations.length) {
+            return;
+        }
+        pendingRelations = editingRelations.filter(function (relation) {
+            return relation && relation.leftFieldId && relation.rightFieldId;
+        }).map(function (relation) {
+            return {
+                leftFieldId: String(relation.leftFieldId),
+                rightFieldId: String(relation.rightFieldId),
+                leftLabel: relation.leftLabel,
+                rightLabel: relation.rightLabel
+            };
+        });
+        ensurePendingRelationNodes();
+        renderPendingRelations();
+    }
+
     function getFieldCenter(container, fieldId) {
         var target = container.querySelector('[data-field-id="' + fieldId + '"]');
         if (!target) {
@@ -317,6 +361,7 @@
             });
         }
 
+        initEditingTemplateRelations();
         renderPendingRelations();
     }
 

@@ -430,6 +430,21 @@ def get_templates(conn):
     return cursor.fetchall()
 
 
+def get_template(conn, template_id):
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT t.id, t.name, t.created_at, COUNT(tr.id) AS relation_count
+        FROM link_templates t
+        LEFT JOIN link_template_relations tr ON tr.template_id = t.id
+        WHERE t.id = ?
+        GROUP BY t.id, t.name, t.created_at
+        """,
+        (template_id,),
+    )
+    return cursor.fetchone()
+
+
 def create_template(conn, template_name, relation_pairs):
     if not relation_pairs:
         raise ValueError("テンプレートに含める関連付けを1件以上追加してください。")
@@ -439,6 +454,27 @@ def create_template(conn, template_name, relation_pairs):
         (template_name, now_str()),
     )
     template_id = cursor.lastrowid
+    for order, relation_pair in enumerate(relation_pairs):
+        left_field_id, right_field_id = relation_pair
+        cursor.execute(
+            "INSERT INTO link_template_relations (template_id, relation_id, left_field_id, right_field_id, sort_order) VALUES (?, ?, ?, ?, ?)",
+            (template_id, 0, left_field_id, right_field_id, order),
+        )
+    conn.commit()
+
+
+def update_template(conn, template_id, template_name, relation_pairs):
+    if not relation_pairs:
+        raise ValueError("テンプレートに含める関連付けを1件以上追加してください。")
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM link_templates WHERE id = ?", (template_id,))
+    if cursor.fetchone() is None:
+        raise ValueError("編集対象のテンプレートが見つかりません。")
+    cursor.execute(
+        "UPDATE link_templates SET name = ? WHERE id = ?",
+        (template_name, template_id),
+    )
+    cursor.execute("DELETE FROM link_template_relations WHERE template_id = ?", (template_id,))
     for order, relation_pair in enumerate(relation_pairs):
         left_field_id, right_field_id = relation_pair
         cursor.execute(
@@ -488,6 +524,29 @@ def get_template_relations(conn, template_id):
         (template_id,),
     )
     return cursor.fetchall()
+
+
+def parse_relation_pairs(pending_relations_raw):
+    try:
+        pending_relations = json.loads(pending_relations_raw)
+    except ValueError:
+        pending_relations = []
+    relation_pairs = []
+    for item in pending_relations:
+        if not isinstance(item, dict):
+            continue
+        left_field_id = int(item.get("leftFieldId", 0) or 0)
+        right_field_id = int(item.get("rightFieldId", 0) or 0)
+        if left_field_id and right_field_id:
+            relation_pairs.append((left_field_id, right_field_id))
+    unique_relation_pairs = []
+    seen_relation_pairs = set()
+    for relation_pair in relation_pairs:
+        if relation_pair in seen_relation_pairs:
+            continue
+        seen_relation_pairs.add(relation_pair)
+        unique_relation_pairs.append(relation_pair)
+    return unique_relation_pairs
 
 
 def export_template_csv(conn, template_id):
@@ -689,11 +748,17 @@ def render_upload_page(conn, message="", level="info"):
     render_footer(False)
 
 
-def render_relation_page(conn, message="", level="info"):
+def render_relation_page(conn, message="", level="info", edit_template_id=0):
     datasets = get_datasets(conn)
     fields = get_dataset_fields(conn)
     relations = get_relations(conn)
     templates = get_templates(conn)
+    editing_template = None
+    editing_relations = []
+    if edit_template_id:
+        editing_template = get_template(conn, edit_template_id)
+        if editing_template is not None:
+            editing_relations = get_template_relations(conn, edit_template_id)
 
     fields_by_dataset = {}
     for field in fields:
@@ -720,11 +785,17 @@ def render_relation_page(conn, message="", level="info"):
     print("<button class=\"btn primary\" type=\"submit\" id=\"save-pending-btn\">まとめて保存</button>")
     print("</form>")
     print("<form method=\"post\" class=\"stack\" id=\"template-form\">")
-    print("<input type=\"hidden\" name=\"action\" value=\"save_template\">")
+    print("<input type=\"hidden\" name=\"action\" value=\"{0}\">".format("update_template" if editing_template else "save_template"))
+    if editing_template is not None:
+        print("<input type=\"hidden\" name=\"template_id\" value=\"{0}\">".format(editing_template["id"]))
     print("<input type=\"hidden\" name=\"pending_relations\" id=\"template-pending-relations\" value=\"[]\">")
-    print("<label>テンプレート名<input type=\"text\" name=\"template_name\" required></label>")
-    print("<p class=\"helper-text\">未保存一覧の関連付けを、そのままテンプレートの関連付けとして保存します。</p>")
-    print("<button class=\"btn\" type=\"submit\">テンプレート保存</button>")
+    print("<label>テンプレート名<input type=\"text\" name=\"template_name\" value=\"{0}\" required></label>".format(html_escape(editing_template["name"]) if editing_template is not None else ""))
+    print("<p class=\"helper-text\">{0}</p>".format("未保存一覧の関連付けでテンプレート内容を更新します。" if editing_template is not None else "未保存一覧の関連付けを、そのままテンプレートの関連付けとして保存します。"))
+    print("<div class=\"template-form-actions\">")
+    print("<button class=\"btn\" type=\"submit\">{0}</button>".format("テンプレート更新" if editing_template is not None else "テンプレート保存"))
+    if editing_template is not None:
+        print("<a class=\"btn\" href=\"?page=relations\">編集をキャンセル</a>")
+    print("</div>")
     print("</form>")
     print("</aside>")
 
@@ -807,6 +878,7 @@ def render_relation_page(conn, message="", level="info"):
             print("<h3>{0}</h3>".format(html_escape(template["name"])))
             print("<p>{0} 件の関連付け / {1}</p>".format(template["relation_count"], html_escape(template["created_at"])))
             print("<div class=\"template-actions\">")
+            print("<a class=\"btn\" href=\"?page=relations&edit_template_id={0}\">編集</a>".format(template["id"]))
             print("<form method=\"post\">")
             print("<input type=\"hidden\" name=\"action\" value=\"export_template\">")
             print("<input type=\"hidden\" name=\"template_id\" value=\"{0}\">".format(template["id"]))
@@ -832,7 +904,17 @@ def render_relation_page(conn, message="", level="info"):
             "rightFieldId": relation["right_field_id"],
         })
     relation_json_text = json.dumps(relation_json).replace("</", "<\\/")
+    editing_relation_json = []
+    for relation in editing_relations:
+        editing_relation_json.append({
+            "leftFieldId": str(relation["left_field_id"]),
+            "rightFieldId": str(relation["right_field_id"]),
+            "leftLabel": "{0}.{1}".format(relation["left_dataset_name"], relation["left_field_name"]),
+            "rightLabel": "{0}.{1}".format(relation["right_dataset_name"], relation["right_field_name"]),
+        })
+    editing_relation_json_text = json.dumps(editing_relation_json).replace("</", "<\\/")
     print("<script id=\"relation-data\" type=\"application/json\">{0}</script>".format(relation_json_text))
+    print("<script id=\"editing-template-relations\" type=\"application/json\">{0}</script>".format(editing_relation_json_text))
     print("</main>")
     render_footer(True)
 
@@ -917,27 +999,17 @@ def handle_post(conn, form):
         pending_relations_raw = form.getfirst("pending_relations", "[]")
         if not template_name:
             raise ValueError("テンプレート名を入力してください。")
-        try:
-            pending_relations = json.loads(pending_relations_raw)
-        except ValueError:
-            pending_relations = []
-        relation_pairs = []
-        for item in pending_relations:
-            if not isinstance(item, dict):
-                continue
-            left_field_id = int(item.get("leftFieldId", 0) or 0)
-            right_field_id = int(item.get("rightFieldId", 0) or 0)
-            if left_field_id and right_field_id:
-                relation_pairs.append((left_field_id, right_field_id))
-        unique_relation_pairs = []
-        seen_relation_pairs = set()
-        for relation_pair in relation_pairs:
-            if relation_pair in seen_relation_pairs:
-                continue
-            seen_relation_pairs.add(relation_pair)
-            unique_relation_pairs.append(relation_pair)
-        create_template(conn, template_name, unique_relation_pairs)
+        create_template(conn, template_name, parse_relation_pairs(pending_relations_raw))
         return "relations", "テンプレートを保存しました。", "success"
+
+    if action == "update_template":
+        template_id = int(form.getfirst("template_id", "0"))
+        template_name = form.getfirst("template_name", "").strip()
+        pending_relations_raw = form.getfirst("pending_relations", "[]")
+        if not template_name:
+            raise ValueError("テンプレート名を入力してください。")
+        update_template(conn, template_id, template_name, parse_relation_pairs(pending_relations_raw))
+        return "relations", "テンプレートを更新しました。", "success"
 
     if action == "delete_template":
         template_id = int(form.getfirst("template_id", "0"))
@@ -968,8 +1040,9 @@ def main():
             return
         if os.environ.get("REQUEST_METHOD", "GET").upper() == "POST":
             page, message, level = handle_post(conn, form)
+        edit_template_id = int(form.getfirst("edit_template_id", "0") or 0)
         if page == "relations":
-            render_relation_page(conn, message, level)
+            render_relation_page(conn, message, level, edit_template_id)
         else:
             render_upload_page(conn, message, level)
     finally:
