@@ -251,6 +251,10 @@ th {
 .builder-side {
     display: grid;
     gap: 16px;
+    width: 320px;
+    min-width: 320px;
+    max-width: 320px;
+    align-self: start;
 }
 
 .builder-main {
@@ -317,6 +321,7 @@ th {
     border-radius: 14px;
     padding: 12px;
     background: #f9fbff;
+    width: 100%;
 }
 
 .pending-head {
@@ -349,6 +354,12 @@ th {
     min-width: 0;
     color: var(--ink);
     word-break: break-word;
+}
+
+#save-pending-btn,
+#template-form > .btn[type="submit"] {
+    justify-self: start;
+    align-self: start;
 }
 
 .builder-canvas {

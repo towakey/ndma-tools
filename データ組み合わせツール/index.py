@@ -109,12 +109,20 @@ def init_db(conn):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             template_id INTEGER NOT NULL,
             relation_id INTEGER NOT NULL,
+            left_field_id INTEGER,
+            right_field_id INTEGER,
             sort_order INTEGER NOT NULL,
             FOREIGN KEY(template_id) REFERENCES link_templates(id),
             FOREIGN KEY(relation_id) REFERENCES relations(id)
         )
         """
     )
+    cursor.execute("PRAGMA table_info(link_template_relations)")
+    template_relation_columns = [row[1] for row in cursor.fetchall()]
+    if "left_field_id" not in template_relation_columns:
+        cursor.execute("ALTER TABLE link_template_relations ADD COLUMN left_field_id INTEGER")
+    if "right_field_id" not in template_relation_columns:
+        cursor.execute("ALTER TABLE link_template_relations ADD COLUMN right_field_id INTEGER")
     conn.commit()
 
 
@@ -319,6 +327,10 @@ def delete_dataset(conn, dataset_id):
         "DELETE FROM link_template_relations WHERE relation_id IN (SELECT id FROM relations WHERE left_dataset_id = ? OR right_dataset_id = ?)",
         (dataset_id, dataset_id),
     )
+    cursor.execute(
+        "DELETE FROM link_template_relations WHERE left_field_id IN (SELECT id FROM dataset_fields WHERE dataset_id = ?) OR right_field_id IN (SELECT id FROM dataset_fields WHERE dataset_id = ?)",
+        (dataset_id, dataset_id),
+    )
     cursor.execute("DELETE FROM relations WHERE left_dataset_id = ? OR right_dataset_id = ?", (dataset_id, dataset_id))
     cursor.execute("DELETE FROM dataset_fields WHERE dataset_id = ?", (dataset_id,))
     cursor.execute("DELETE FROM datasets WHERE id = ?", (dataset_id,))
@@ -418,19 +430,20 @@ def get_templates(conn):
     return cursor.fetchall()
 
 
-def create_template(conn, template_name, relation_ids):
-    if not relation_ids:
-        raise ValueError("テンプレートに含める関連付けを1件以上選択してください。")
+def create_template(conn, template_name, relation_pairs):
+    if not relation_pairs:
+        raise ValueError("テンプレートに含める関連付けを1件以上追加してください。")
     cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO link_templates (name, created_at) VALUES (?, ?)",
         (template_name, now_str()),
     )
     template_id = cursor.lastrowid
-    for order, relation_id in enumerate(relation_ids):
+    for order, relation_pair in enumerate(relation_pairs):
+        left_field_id, right_field_id = relation_pair
         cursor.execute(
-            "INSERT INTO link_template_relations (template_id, relation_id, sort_order) VALUES (?, ?, ?)",
-            (template_id, relation_id, order),
+            "INSERT INTO link_template_relations (template_id, relation_id, left_field_id, right_field_id, sort_order) VALUES (?, ?, ?, ?, ?)",
+            (template_id, 0, left_field_id, right_field_id, order),
         )
     conn.commit()
 
@@ -448,11 +461,11 @@ def get_template_relations(conn, template_id):
         """
         SELECT
             tr.sort_order,
-            r.id,
-            r.left_dataset_id,
-            r.left_field_id,
-            r.right_dataset_id,
-            r.right_field_id,
+            COALESCE(r.id, 0) AS id,
+            ldf.dataset_id AS left_dataset_id,
+            COALESCE(tr.left_field_id, r.left_field_id) AS left_field_id,
+            rdf.dataset_id AS right_dataset_id,
+            COALESCE(tr.right_field_id, r.right_field_id) AS right_field_id,
             ld.name AS left_dataset_name,
             lf.display_name AS left_field_name,
             rd.name AS right_dataset_name,
@@ -462,11 +475,13 @@ def get_template_relations(conn, template_id):
             lf.field_key AS left_field_key,
             rf.field_key AS right_field_key
         FROM link_template_relations tr
-        JOIN relations r ON r.id = tr.relation_id
-        JOIN datasets ld ON ld.id = r.left_dataset_id
-        JOIN datasets rd ON rd.id = r.right_dataset_id
-        JOIN dataset_fields lf ON lf.id = r.left_field_id
-        JOIN dataset_fields rf ON rf.id = r.right_field_id
+        LEFT JOIN relations r ON r.id = tr.relation_id
+        JOIN dataset_fields lf ON lf.id = COALESCE(tr.left_field_id, r.left_field_id)
+        JOIN dataset_fields rf ON rf.id = COALESCE(tr.right_field_id, r.right_field_id)
+        JOIN dataset_fields ldf ON ldf.id = lf.id
+        JOIN dataset_fields rdf ON rdf.id = rf.id
+        JOIN datasets ld ON ld.id = ldf.dataset_id
+        JOIN datasets rd ON rd.id = rdf.dataset_id
         WHERE tr.template_id = ?
         ORDER BY tr.sort_order ASC, tr.id ASC
         """,
@@ -704,19 +719,11 @@ def render_relation_page(conn, message="", level="info"):
     print("</div>")
     print("<button class=\"btn primary\" type=\"submit\" id=\"save-pending-btn\">まとめて保存</button>")
     print("</form>")
-    print("<form method=\"post\" class=\"stack\">")
+    print("<form method=\"post\" class=\"stack\" id=\"template-form\">")
     print("<input type=\"hidden\" name=\"action\" value=\"save_template\">")
+    print("<input type=\"hidden\" name=\"pending_relations\" id=\"template-pending-relations\" value=\"[]\">")
     print("<label>テンプレート名<input type=\"text\" name=\"template_name\" required></label>")
-    print("<label>関連付け選択<select name=\"relation_ids\" multiple size=\"8\">")
-    for relation in relations:
-        label = "{0}.{1} → {2}.{3}".format(
-            relation["left_dataset_name"],
-            relation["left_field_name"],
-            relation["right_dataset_name"],
-            relation["right_field_name"],
-        )
-        print("<option value=\"{0}\">{1}</option>".format(relation["id"], html_escape(label)))
-    print("</select></label>")
+    print("<p class=\"helper-text\">未保存一覧の関連付けを、そのままテンプレートの関連付けとして保存します。</p>")
     print("<button class=\"btn\" type=\"submit\">テンプレート保存</button>")
     print("</form>")
     print("</aside>")
@@ -907,10 +914,29 @@ def handle_post(conn, form):
 
     if action == "save_template":
         template_name = form.getfirst("template_name", "").strip()
-        relation_ids = form.getlist("relation_ids")
+        pending_relations_raw = form.getfirst("pending_relations", "[]")
         if not template_name:
             raise ValueError("テンプレート名を入力してください。")
-        create_template(conn, template_name, [int(value) for value in relation_ids])
+        try:
+            pending_relations = json.loads(pending_relations_raw)
+        except ValueError:
+            pending_relations = []
+        relation_pairs = []
+        for item in pending_relations:
+            if not isinstance(item, dict):
+                continue
+            left_field_id = int(item.get("leftFieldId", 0) or 0)
+            right_field_id = int(item.get("rightFieldId", 0) or 0)
+            if left_field_id and right_field_id:
+                relation_pairs.append((left_field_id, right_field_id))
+        unique_relation_pairs = []
+        seen_relation_pairs = set()
+        for relation_pair in relation_pairs:
+            if relation_pair in seen_relation_pairs:
+                continue
+            seen_relation_pairs.add(relation_pair)
+            unique_relation_pairs.append(relation_pair)
+        create_template(conn, template_name, unique_relation_pairs)
         return "relations", "テンプレートを保存しました。", "success"
 
     if action == "delete_template":

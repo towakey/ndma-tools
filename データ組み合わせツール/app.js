@@ -225,10 +225,12 @@
     }
 
     function syncPendingRelationsInput() {
-        var input = document.getElementById("pending-relations");
-        if (input) {
-            input.value = JSON.stringify(pendingRelations);
-        }
+        ["pending-relations", "template-pending-relations"].forEach(function (inputId) {
+            var input = document.getElementById(inputId);
+            if (input) {
+                input.value = JSON.stringify(pendingRelations);
+            }
+        });
     }
 
     function renderPendingRelations() {
@@ -304,6 +306,13 @@
         var relationForm = document.getElementById("relation-form");
         if (relationForm) {
             relationForm.addEventListener("submit", function () {
+                syncPendingRelationsInput();
+            });
+        }
+
+        var templateForm = document.getElementById("template-form");
+        if (templateForm) {
+            templateForm.addEventListener("submit", function () {
                 syncPendingRelationsInput();
             });
         }
