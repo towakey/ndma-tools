@@ -128,7 +128,9 @@ label {
 }
 
 input[type="text"],
+input[type="password"],
 input[type="file"],
+textarea,
 select {
     width: 100%;
     padding: 10px 12px;
@@ -136,6 +138,12 @@ select {
     border-radius: 12px;
     background: #ffffff;
     color: var(--ink);
+}
+
+textarea {
+    min-height: 140px;
+    resize: vertical;
+    font: inherit;
 }
 
 select[multiple] {

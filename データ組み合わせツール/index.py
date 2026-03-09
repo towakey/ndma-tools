@@ -8,10 +8,11 @@ import sqlite3
 import traceback
 import datetime
 import urllib.parse
+import shutil
+import subprocess
 
 import cgi
 import cgitb
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "app.db")
 EXPORT_DIR = os.path.join(BASE_DIR, "exports")
@@ -21,6 +22,13 @@ STATIC_FILES = {
     "app.css": ("text/css; charset=utf-8", "app.css"),
     "app.js": ("application/javascript; charset=utf-8", "app.js"),
 }
+MYSQL_CLIENT_CANDIDATES = [
+    r"C:\xampp\mysql\bin\mysql.exe",
+    "mysql",
+]
+POSTGRES_CLIENT_CANDIDATES = [
+    "psql",
+]
 
 
 def configure_output():
@@ -61,7 +69,11 @@ def init_db(conn):
             table_name TEXT NOT NULL UNIQUE,
             encoding TEXT NOT NULL,
             row_count INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            source_type TEXT NOT NULL DEFAULT 'csv',
+            source_config TEXT NOT NULL DEFAULT '',
+            source_query TEXT NOT NULL DEFAULT '',
+            last_refreshed_at TEXT NOT NULL DEFAULT ''
         )
         """
     )
@@ -123,6 +135,20 @@ def init_db(conn):
         cursor.execute("ALTER TABLE link_template_relations ADD COLUMN left_field_id INTEGER")
     if "right_field_id" not in template_relation_columns:
         cursor.execute("ALTER TABLE link_template_relations ADD COLUMN right_field_id INTEGER")
+    cursor.execute("PRAGMA table_info(datasets)")
+    dataset_columns = [row[1] for row in cursor.fetchall()]
+    if "source_type" not in dataset_columns:
+        cursor.execute("ALTER TABLE datasets ADD COLUMN source_type TEXT NOT NULL DEFAULT 'csv'")
+    if "source_config" not in dataset_columns:
+        cursor.execute("ALTER TABLE datasets ADD COLUMN source_config TEXT NOT NULL DEFAULT ''")
+    if "source_query" not in dataset_columns:
+        cursor.execute("ALTER TABLE datasets ADD COLUMN source_query TEXT NOT NULL DEFAULT ''")
+    if "last_refreshed_at" not in dataset_columns:
+        cursor.execute("ALTER TABLE datasets ADD COLUMN last_refreshed_at TEXT NOT NULL DEFAULT ''")
+    cursor.execute("UPDATE datasets SET source_type = 'csv' WHERE source_type IS NULL OR source_type = ''")
+    cursor.execute("UPDATE datasets SET source_config = '' WHERE source_config IS NULL")
+    cursor.execute("UPDATE datasets SET source_query = '' WHERE source_query IS NULL")
+    cursor.execute("UPDATE datasets SET last_refreshed_at = created_at WHERE last_refreshed_at IS NULL OR last_refreshed_at = ''")
     conn.commit()
 
 
@@ -147,6 +173,88 @@ def next_table_name(conn):
     return "data_{0}".format(next_id)
 
 
+def next_field_key(existing_field_keys):
+    max_index = 0
+    for field_key in existing_field_keys:
+        text = str(field_key or "")
+        if not text.startswith("col_"):
+            continue
+        try:
+            max_index = max(max_index, int(text[4:]))
+        except ValueError:
+            continue
+    return "col_{0:03d}".format(max_index + 1)
+
+
+def normalize_headers(headers):
+    normalized = []
+    for index, value in enumerate(headers):
+        header = str(value).strip() if value is not None else ""
+        normalized.append(header or "列{0}".format(index + 1))
+    return normalized
+
+
+def find_mysql_client_path():
+    for candidate in MYSQL_CLIENT_CANDIDATES:
+        if os.path.isabs(candidate) and os.path.exists(candidate):
+            return candidate
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    raise ValueError("MySQLクライアントが見つかりません。XAMPPのMySQLが利用できる状態か確認してください.")
+
+
+def find_postgresql_client_path():
+    for candidate in POSTGRES_CLIENT_CANDIDATES:
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    program_dirs = [
+        os.environ.get("ProgramFiles", r"C:\Program Files"),
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+    ]
+    for base_dir in program_dirs:
+        postgres_root = os.path.join(base_dir, "PostgreSQL")
+        if not os.path.isdir(postgres_root):
+            continue
+        for version_name in sorted(os.listdir(postgres_root), reverse=True):
+            candidate_path = os.path.join(postgres_root, version_name, "bin", "psql.exe")
+            if os.path.exists(candidate_path):
+                return candidate_path
+    raise ValueError("PostgreSQLクライアントが見つかりません。psql が利用できる状態か確認してください。")
+
+
+def build_source_config_text(source_config):
+    return json.dumps(source_config, ensure_ascii=False)
+
+
+def parse_source_config_text(source_config_text):
+    if not source_config_text:
+        return {}
+    try:
+        parsed = json.loads(source_config_text)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def format_mysql_source_label(source_config):
+    host = str(source_config.get("host", "localhost") or "localhost").strip() or "localhost"
+    port = str(source_config.get("port", "3306") or "3306").strip() or "3306"
+    database_name = str(source_config.get("database", "") or "").strip()
+    user = str(source_config.get("user", "") or "").strip()
+    parts = ["{0}:{1}".format(host, port)]
+    if database_name:
+        parts.append(database_name)
+    if user:
+        parts.append(user)
+    return " / ".join(parts)
+
+
+def format_postgresql_source_label(source_config):
+    return format_mysql_source_label(source_config)
+
+
 def detect_encoding(raw_bytes):
     for encoding in ("utf-8-sig", "utf-8", "cp932"):
         try:
@@ -155,6 +263,190 @@ def detect_encoding(raw_bytes):
         except UnicodeDecodeError:
             continue
     raise ValueError("CSVの文字コードを判定できませんでした。UTF-8 または CP932 を使用してください。")
+
+
+def sanitize_query_text(query_text):
+    normalized_query = (query_text or "").strip()
+    if not normalized_query:
+        raise ValueError("取得クエリを入力してください。")
+    while normalized_query.endswith(";"):
+        normalized_query = normalized_query[:-1].rstrip()
+    if not normalized_query:
+        raise ValueError("取得クエリを入力してください。")
+    if ";" in normalized_query:
+        raise ValueError("取得クエリは1文のみ指定してください。")
+    first_token = normalized_query.split(None, 1)[0].lower()
+    if first_token not in ("select", "with"):
+        raise ValueError("取得クエリはSELECTまたはWITHで始めてください。")
+    return normalized_query
+
+
+def mysql_cli_unescape(value):
+    escaped_map = {
+        "0": "\0",
+        "b": "\b",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "Z": "\x1a",
+        "\\": "\\",
+    }
+    result = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "\\" and index + 1 < len(value):
+            next_char = value[index + 1]
+            if next_char == "N":
+                result.append("")
+                index += 2
+                continue
+            if next_char in escaped_map:
+                result.append(escaped_map[next_char])
+                index += 2
+                continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def parse_mysql_batch_output(output_text):
+    reader = csv.reader(io.StringIO(output_text), delimiter="\t")
+    rows = list(reader)
+    if not rows:
+        raise ValueError("クエリ結果が取得できませんでした。")
+    headers = normalize_headers([mysql_cli_unescape(value) for value in rows[0]])
+    data_rows = []
+    width = len(headers)
+    for row in rows[1:]:
+        values = [mysql_cli_unescape(value) for value in list(row[:width])]
+        while len(values) < width:
+            values.append("")
+        data_rows.append(values)
+    return headers, data_rows
+
+
+def parse_csv_output(output_text):
+    reader = csv.reader(io.StringIO(output_text))
+    rows = list(reader)
+    if not rows:
+        raise ValueError("クエリ結果が取得できませんでした。")
+    headers = normalize_headers(rows[0])
+    data_rows = rows[1:]
+    return headers, data_rows
+
+
+def run_mysql_query(source_config, query_text):
+    mysql_client_path = find_mysql_client_path()
+    host = str(source_config.get("host", "localhost") or "localhost").strip() or "localhost"
+    port_text = str(source_config.get("port", "3306") or "3306").strip() or "3306"
+    database_name = str(source_config.get("database", "") or "").strip()
+    user = str(source_config.get("user", "") or "").strip()
+    password = str(source_config.get("password", "") or "")
+    if not database_name:
+        raise ValueError("データベース名を入力してください。")
+    if not user:
+        raise ValueError("ユーザー名を入力してください。")
+    try:
+        port = int(port_text)
+    except ValueError:
+        raise ValueError("ポート番号は数値で入力してください。")
+    command = [
+        mysql_client_path,
+        "--batch",
+        "--default-character-set=utf8mb4",
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--user",
+        user,
+        "--database",
+        database_name,
+        "--execute",
+        query_text,
+    ]
+    env = os.environ.copy()
+    if password:
+        env["MYSQL_PWD"] = password
+    else:
+        env.pop("MYSQL_PWD", None)
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        raise ValueError("MySQLクエリの実行がタイムアウトしました。")
+    except OSError as exc:
+        raise ValueError("MySQLクライアントを実行できませんでした: {0}".format(exc))
+    if completed.returncode != 0:
+        error_message = (completed.stderr or completed.stdout).strip()
+        raise ValueError(error_message or "MySQLクエリの実行に失敗しました。")
+    return parse_mysql_batch_output(completed.stdout)
+
+
+def run_postgresql_query(source_config, query_text):
+    postgresql_client_path = find_postgresql_client_path()
+    host = str(source_config.get("host", "localhost") or "localhost").strip() or "localhost"
+    port_text = str(source_config.get("port", "5432") or "5432").strip() or "5432"
+    database_name = str(source_config.get("database", "") or "").strip()
+    user = str(source_config.get("user", "") or "").strip()
+    password = str(source_config.get("password", "") or "")
+    if not database_name:
+        raise ValueError("データベース名を入力してください。")
+    if not user:
+        raise ValueError("ユーザー名を入力してください。")
+    try:
+        port = int(port_text)
+    except ValueError:
+        raise ValueError("ポート番号は数値で入力してください。")
+    copy_sql = "COPY ({0}) TO STDOUT WITH (FORMAT CSV, HEADER TRUE)".format(query_text)
+    command = [
+        postgresql_client_path,
+        "-X",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-h",
+        host,
+        "-p",
+        str(port),
+        "-U",
+        user,
+        "-d",
+        database_name,
+        "-c",
+        copy_sql,
+    ]
+    env = os.environ.copy()
+    env["PGCLIENTENCODING"] = "UTF8"
+    if password:
+        env["PGPASSWORD"] = password
+    else:
+        env.pop("PGPASSWORD", None)
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        raise ValueError("PostgreSQLクエリの実行がタイムアウトしました。")
+    except OSError as exc:
+        raise ValueError("PostgreSQLクライアントを実行できませんでした: {0}".format(exc))
+    if completed.returncode != 0:
+        error_message = (completed.stderr or completed.stdout).strip()
+        raise ValueError(error_message or "PostgreSQLクエリの実行に失敗しました。")
+    return parse_csv_output(completed.stdout)
 
 
 def load_csv_rows(file_item):
@@ -167,28 +459,63 @@ def load_csv_rows(file_item):
     rows = list(reader)
     if not rows:
         raise ValueError("CSVにデータがありません。")
-    headers = [value.strip() or "列{0}".format(index + 1) for index, value in enumerate(rows[0])]
+    headers = normalize_headers(rows[0])
     data_rows = rows[1:]
     return encoding, headers, data_rows
 
 
-def create_dataset(conn, dataset_name, original_filename, encoding, headers, data_rows):
+def create_dataset_storage(cursor, table_name, field_keys):
+    create_table_sql = "CREATE TABLE {0} (row_id INTEGER PRIMARY KEY AUTOINCREMENT".format(
+        quote_identifier(table_name)
+    )
+    for field_key in field_keys:
+        create_table_sql += ", {0} TEXT".format(quote_identifier(field_key))
+    create_table_sql += ")"
+    cursor.execute(create_table_sql)
+
+
+def insert_dataset_rows(cursor, table_name, field_keys, data_rows):
+    if not data_rows:
+        return
+    placeholders = ", ".join(["?"] * len(field_keys))
+    insert_sql = "INSERT INTO {0} ({1}) VALUES ({2})".format(
+        quote_identifier(table_name),
+        ", ".join(quote_identifier(field_key) for field_key in field_keys),
+        placeholders,
+    )
+    normalized_rows = []
+    width = len(field_keys)
+    for row in data_rows:
+        values = []
+        for value in list(row[:width]):
+            values.append("" if value is None else str(value))
+        while len(values) < width:
+            values.append("")
+        normalized_rows.append(values)
+    cursor.executemany(insert_sql, normalized_rows)
+
+
+def create_dataset(conn, dataset_name, original_filename, encoding, headers, data_rows, source_type="csv", source_config_text="", source_query="", last_refreshed_at=""):
     cursor = conn.cursor()
     table_name = next_table_name(conn)
     created_at = now_str()
+    refreshed_at = last_refreshed_at or created_at
+    headers = normalize_headers(headers)
+    if not headers:
+        raise ValueError("列情報がありません。")
     row_count = len(data_rows)
     cursor.execute(
         """
-        INSERT INTO datasets (name, original_filename, table_name, encoding, row_count, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO datasets (name, original_filename, table_name, encoding, row_count, created_at, source_type, source_config, source_query, last_refreshed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (dataset_name, original_filename, table_name, encoding, row_count, created_at),
+        (dataset_name, original_filename, table_name, encoding, row_count, created_at, source_type, source_config_text, source_query, refreshed_at),
     )
     dataset_id = cursor.lastrowid
 
     field_keys = []
     for index, header in enumerate(headers):
-        field_key = "col_{0:03d}".format(index + 1)
+        field_key = next_field_key(field_keys)
         field_keys.append(field_key)
         cursor.execute(
             """
@@ -198,29 +525,8 @@ def create_dataset(conn, dataset_name, original_filename, encoding, headers, dat
             (dataset_id, field_key, header, header, index),
         )
 
-    create_table_sql = "CREATE TABLE {0} (row_id INTEGER PRIMARY KEY AUTOINCREMENT".format(
-        quote_identifier(table_name)
-    )
-    for field_key in field_keys:
-        create_table_sql += ", {0} TEXT".format(quote_identifier(field_key))
-    create_table_sql += ")"
-    cursor.execute(create_table_sql)
-
-    if data_rows:
-        placeholders = ", ".join(["?"] * len(field_keys))
-        insert_sql = "INSERT INTO {0} ({1}) VALUES ({2})".format(
-            quote_identifier(table_name),
-            ", ".join(quote_identifier(field_key) for field_key in field_keys),
-            placeholders,
-        )
-        normalized_rows = []
-        width = len(field_keys)
-        for row in data_rows:
-            values = list(row[:width])
-            while len(values) < width:
-                values.append("")
-            normalized_rows.append(values)
-        cursor.executemany(insert_sql, normalized_rows)
+    create_dataset_storage(cursor, table_name, field_keys)
+    insert_dataset_rows(cursor, table_name, field_keys, data_rows)
     conn.commit()
 
 
@@ -228,12 +534,25 @@ def get_datasets(conn):
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT id, name, original_filename, table_name, encoding, row_count, created_at
+        SELECT id, name, original_filename, table_name, encoding, row_count, created_at, source_type, source_config, source_query, last_refreshed_at
         FROM datasets
         ORDER BY created_at DESC, id DESC
         """
     )
     return cursor.fetchall()
+
+
+def get_dataset(conn, dataset_id):
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, name, original_filename, table_name, encoding, row_count, created_at, source_type, source_config, source_query, last_refreshed_at
+        FROM datasets
+        WHERE id = ?
+        """,
+        (dataset_id,),
+    )
+    return cursor.fetchone()
 
 
 def seed_samples_if_needed(conn):
@@ -261,7 +580,7 @@ def seed_samples_if_needed(conn):
         rows = list(reader)
         if not rows:
             continue
-        headers = [value.strip() or "列{0}".format(index + 1) for index, value in enumerate(rows[0])]
+        headers = normalize_headers(rows[0])
         data_rows = rows[1:]
         dataset_name = os.path.splitext(os.path.basename(sample_path))[0]
         create_dataset(
@@ -336,6 +655,227 @@ def delete_dataset(conn, dataset_id):
     cursor.execute("DELETE FROM datasets WHERE id = ?", (dataset_id,))
     cursor.execute("DROP TABLE IF EXISTS {0}".format(quote_identifier(table_name)))
     conn.commit()
+
+
+def delete_field_dependencies(cursor, field_ids):
+    if not field_ids:
+        return
+    placeholders = ", ".join(["?"] * len(field_ids))
+    params = tuple(field_ids)
+    cursor.execute(
+        "DELETE FROM link_template_relations WHERE relation_id IN (SELECT id FROM relations WHERE left_field_id IN ({0}) OR right_field_id IN ({0}))".format(placeholders),
+        params + params,
+    )
+    cursor.execute(
+        "DELETE FROM link_template_relations WHERE left_field_id IN ({0}) OR right_field_id IN ({0})".format(placeholders),
+        params + params,
+    )
+    cursor.execute(
+        "DELETE FROM relations WHERE left_field_id IN ({0}) OR right_field_id IN ({0})".format(placeholders),
+        params + params,
+    )
+    cursor.execute(
+        "DELETE FROM dataset_fields WHERE id IN ({0})".format(placeholders),
+        params,
+    )
+
+
+def refresh_dataset(conn, dataset_id, original_filename, encoding, headers, data_rows, source_type=None, source_config_text=None, source_query=None):
+    dataset = get_dataset(conn, dataset_id)
+    if dataset is None:
+        raise ValueError("更新対象のデータが見つかりません。")
+    headers = normalize_headers(headers)
+    if not headers:
+        raise ValueError("列情報がありません。")
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, dataset_id, field_key, original_name, display_name, sort_order
+        FROM dataset_fields
+        WHERE dataset_id = ?
+        ORDER BY sort_order ASC, id ASC
+        """,
+        (dataset_id,),
+    )
+    existing_fields = cursor.fetchall()
+    existing_by_name = {}
+    for field in existing_fields:
+        existing_by_name.setdefault(field["original_name"], []).append(field)
+    matched_field_ids = set()
+    current_field_keys = [field["field_key"] for field in existing_fields]
+    final_field_keys = []
+    for index, header in enumerate(headers):
+        matched_field = None
+        for field in existing_by_name.get(header, []):
+            if field["id"] not in matched_field_ids:
+                matched_field = field
+                break
+        if matched_field is not None:
+            matched_field_ids.add(matched_field["id"])
+            cursor.execute(
+                "UPDATE dataset_fields SET original_name = ?, sort_order = ? WHERE id = ?",
+                (header, index, matched_field["id"]),
+            )
+            final_field_keys.append(matched_field["field_key"])
+            continue
+        field_key = next_field_key(current_field_keys)
+        current_field_keys.append(field_key)
+        cursor.execute(
+            """
+            INSERT INTO dataset_fields (dataset_id, field_key, original_name, display_name, sort_order)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (dataset_id, field_key, header, header, index),
+        )
+        final_field_keys.append(field_key)
+    removed_field_ids = [field["id"] for field in existing_fields if field["id"] not in matched_field_ids]
+    delete_field_dependencies(cursor, removed_field_ids)
+    cursor.execute("DROP TABLE IF EXISTS {0}".format(quote_identifier(dataset["table_name"])))
+    create_dataset_storage(cursor, dataset["table_name"], final_field_keys)
+    insert_dataset_rows(cursor, dataset["table_name"], final_field_keys, data_rows)
+    cursor.execute(
+        """
+        UPDATE datasets
+        SET original_filename = ?, encoding = ?, row_count = ?, source_type = ?, source_config = ?, source_query = ?, last_refreshed_at = ?
+        WHERE id = ?
+        """,
+        (
+            original_filename,
+            encoding,
+            len(data_rows),
+            source_type if source_type is not None else dataset["source_type"],
+            source_config_text if source_config_text is not None else dataset["source_config"],
+            source_query if source_query is not None else dataset["source_query"],
+            now_str(),
+            dataset_id,
+        ),
+    )
+    conn.commit()
+
+
+def parse_mysql_source_form(form):
+    return parse_db_source_form(form, "mysql")
+
+
+def parse_db_source_form(form, forced_db_type=""):
+    db_type = (forced_db_type or form.getfirst("db_type", "mysql")).strip().lower() or "mysql"
+    if db_type not in ("mysql", "postgresql"):
+        raise ValueError("DB種別が不正です。")
+    default_port = "5432" if db_type == "postgresql" else "3306"
+    host = form.getfirst("db_host", "localhost").strip() or "localhost"
+    port_text = form.getfirst("db_port", default_port).strip() or default_port
+    database_name = form.getfirst("db_name", "").strip()
+    user = form.getfirst("db_user", "").strip()
+    password = form.getfirst("db_password", "")
+    if not database_name:
+        raise ValueError("データベース名を入力してください。")
+    if not user:
+        raise ValueError("ユーザー名を入力してください。")
+    try:
+        int(port_text)
+    except ValueError:
+        raise ValueError("ポート番号は数値で入力してください。")
+    return {
+        "db_type": db_type,
+        "host": host,
+        "port": port_text,
+        "database": database_name,
+        "user": user,
+        "password": password,
+    }
+
+
+def register_mysql_dataset(conn, dataset_name, source_config, query_text):
+    sanitized_query = sanitize_query_text(query_text)
+    headers, data_rows = run_mysql_query(source_config, sanitized_query)
+    create_dataset(
+        conn,
+        dataset_name,
+        "MySQLクエリ",
+        "utf-8",
+        headers,
+        data_rows,
+        source_type="mysql_query",
+        source_config_text=build_source_config_text(source_config),
+        source_query=sanitized_query,
+    )
+    return len(data_rows)
+
+
+def register_postgresql_dataset(conn, dataset_name, source_config, query_text):
+    sanitized_query = sanitize_query_text(query_text)
+    headers, data_rows = run_postgresql_query(source_config, sanitized_query)
+    create_dataset(
+        conn,
+        dataset_name,
+        "PostgreSQLクエリ",
+        "utf-8",
+        headers,
+        data_rows,
+        source_type="postgresql_query",
+        source_config_text=build_source_config_text(source_config),
+        source_query=sanitized_query,
+    )
+    return len(data_rows)
+
+
+def register_db_dataset(conn, dataset_name, source_config, query_text):
+    if source_config["db_type"] == "mysql":
+        return register_mysql_dataset(conn, dataset_name, source_config, query_text)
+    if source_config["db_type"] == "postgresql":
+        return register_postgresql_dataset(conn, dataset_name, source_config, query_text)
+    raise ValueError("DB種別が不正です。")
+
+
+def refresh_mysql_dataset(conn, dataset_id):
+    dataset = get_dataset(conn, dataset_id)
+    if dataset is None:
+        raise ValueError("更新対象のデータが見つかりません。")
+    if dataset["source_type"] != "mysql_query":
+        raise ValueError("このデータはDB更新に対応していません。")
+    source_config = parse_source_config_text(dataset["source_config"])
+    sanitized_query = sanitize_query_text(dataset["source_query"])
+    headers, data_rows = run_mysql_query(source_config, sanitized_query)
+    refresh_dataset(
+        conn,
+        dataset_id,
+        dataset["original_filename"],
+        "utf-8",
+        headers,
+        data_rows,
+    )
+    return len(data_rows)
+
+
+def refresh_postgresql_dataset(conn, dataset_id):
+    dataset = get_dataset(conn, dataset_id)
+    if dataset is None:
+        raise ValueError("更新対象のデータが見つかりません。")
+    if dataset["source_type"] != "postgresql_query":
+        raise ValueError("このデータはDB更新に対応していません。")
+    source_config = parse_source_config_text(dataset["source_config"])
+    sanitized_query = sanitize_query_text(dataset["source_query"])
+    headers, data_rows = run_postgresql_query(source_config, sanitized_query)
+    refresh_dataset(
+        conn,
+        dataset_id,
+        dataset["original_filename"],
+        "utf-8",
+        headers,
+        data_rows,
+    )
+    return len(data_rows)
+
+
+def refresh_db_dataset(conn, dataset_id):
+    dataset = get_dataset(conn, dataset_id)
+    if dataset is None:
+        raise ValueError("更新対象のデータが見つかりません。")
+    if dataset["source_type"] == "postgresql_query":
+        return refresh_postgresql_dataset(conn, dataset_id)
+    if dataset["source_type"] == "mysql_query":
+        return refresh_mysql_dataset(conn, dataset_id)
+    raise ValueError("このデータはDB更新に対応していません。")
 
 
 def get_relations(conn):
@@ -654,7 +1194,7 @@ def render_navigation(page):
     ]
     print("<header class=\"hero\">")
     print("<div class=\"hero-inner\">")
-    print("<div><h1>データ組み合わせツール</h1><p>CSVを取り込み、列同士の関係を定義し、テンプレートとして再利用できます。</p></div>")
+    print("<div><h1>データ組み合わせツール</h1><p>CSVやDBクエリ結果を取り込み、列同士の関係を定義し、テンプレートとして再利用できます。</p></div>")
     print("<nav class=\"tabs\">")
     for key, label in pages:
         class_name = "tab is-active" if key == page else "tab"
@@ -693,24 +1233,62 @@ def render_upload_page(conn, message="", level="info"):
     print("</section>")
 
     print("<section class=\"panel\">")
+    print("<h2>DBクエリ取り込み</h2>")
+    print("<form method=\"post\" class=\"stack\">")
+    print("<input type=\"hidden\" name=\"action\" value=\"register_db_dataset\">")
+    print("<div class=\"two-col\">")
+    print("<label>DB種別<select name=\"db_type\"><option value=\"mysql\">MySQL</option><option value=\"postgresql\">PostgreSQL</option></select></label>")
+    print("<label>表示名<input type=\"text\" name=\"dataset_name\" required></label>")
+    print("</div>")
+    print("<div class=\"two-col\">")
+    print("<label>ホスト<input type=\"text\" name=\"db_host\" value=\"localhost\" required></label>")
+    print("<label>ポート<input type=\"text\" name=\"db_port\" value=\"\"></label>")
+    print("</div>")
+    print("<div class=\"two-col\">")
+    print("<label>データベース名<input type=\"text\" name=\"db_name\" required></label>")
+    print("<label>ユーザー名<input type=\"text\" name=\"db_user\" required></label>")
+    print("</div>")
+    print("<label>パスワード<input type=\"password\" name=\"db_password\"></label>")
+    print("<label>取得クエリ<textarea name=\"db_query\" required></textarea></label>")
+    print("<p class=\"helper-text\">MySQL と PostgreSQL に対応しています。ポート未入力時は MySQL=3306、PostgreSQL=5432 を使用します。登録後は更新ボタンで同じ接続先・クエリから再取得できます。</p>")
+    print("<button class=\"btn primary\" type=\"submit\">DBから取り込む</button>")
+    print("</form>")
+    print("</section>")
+
+    print("<section class=\"panel\">")
     print("<div class=\"panel-head\"><h2>登録済みデータ</h2><span>{0} 件</span></div>".format(len(datasets)))
     if not datasets:
-        print("<p class=\"empty\">まだCSVは登録されていません。</p>")
+        print("<p class=\"empty\">まだデータは登録されていません。</p>")
     for dataset in datasets:
         dataset_id = dataset["id"]
         dataset_fields = fields_by_dataset.get(dataset_id, [])
         sample_rows = samples.get(dataset_id, [])
+        source_type = dataset["source_type"] or "csv"
+        source_config = parse_source_config_text(dataset["source_config"])
+        source_label = dataset["original_filename"]
+        if source_type == "mysql_query":
+            source_label = "MySQL / {0}".format(format_mysql_source_label(source_config))
+        elif source_type == "postgresql_query":
+            source_label = "PostgreSQL / {0}".format(format_postgresql_source_label(source_config))
         print("<article class=\"dataset-card\">")
         print("<div class=\"dataset-card-head\">")
         print("<div>")
         print("<h3>{0}</h3>".format(html_escape(dataset["name"])))
         print("<p>{0} / {1} 行 / {2}</p>".format(
-            html_escape(dataset["original_filename"]),
+            html_escape(source_label),
             dataset["row_count"],
             html_escape(dataset["encoding"]),
         ))
+        if source_type in ("mysql_query", "postgresql_query"):
+            print("<p class=\"helper-text\">最終更新: {0}</p>".format(html_escape(dataset["last_refreshed_at"] or dataset["created_at"])))
         print("</div>")
         print("<div class=\"dataset-actions\">")
+        if source_type in ("mysql_query", "postgresql_query"):
+            print("<form method=\"post\" class=\"inline-form\">")
+            print("<input type=\"hidden\" name=\"action\" value=\"refresh_db_dataset\">")
+            print("<input type=\"hidden\" name=\"dataset_id\" value=\"{0}\">".format(dataset_id))
+            print("<button class=\"btn\" type=\"submit\">更新</button>")
+            print("</form>")
         print("<form method=\"post\" class=\"inline-form\">")
         print("<input type=\"hidden\" name=\"action\" value=\"rename_dataset\">")
         print("<input type=\"hidden\" name=\"dataset_id\" value=\"{0}\">".format(dataset_id))
@@ -844,7 +1422,6 @@ def render_relation_page(conn, message="", level="info", edit_template_id=0):
         print("</div></section>")
     print("</div>")
     print("</div>")
-    print("</div>")
     if relations:
         print("<div class=\"table-wrap\"><table><thead><tr><th>ID</th><th>関連</th><th>操作</th></tr></thead><tbody>")
         for relation in relations:
@@ -949,6 +1526,15 @@ def handle_post(conn, form):
         create_dataset(conn, dataset_name, os.path.basename(file_item.filename), encoding, headers, data_rows)
         return "upload", "データを取り込みました。", "success"
 
+    if action == "register_db_dataset":
+        dataset_name = form.getfirst("dataset_name", "").strip()
+        query_text = form.getfirst("db_query", "")
+        if not dataset_name:
+            raise ValueError("表示名を入力してください。")
+        source_config = parse_db_source_form(form)
+        row_count = register_db_dataset(conn, dataset_name, source_config, query_text)
+        return "upload", "DBからデータを取り込みました。{0} 行取得しました。".format(row_count), "success"
+
     if action == "rename_dataset":
         dataset_id = int(form.getfirst("dataset_id", "0"))
         new_name = form.getfirst("new_name", "").strip()
@@ -961,6 +1547,11 @@ def handle_post(conn, form):
         dataset_id = int(form.getfirst("dataset_id", "0"))
         delete_dataset(conn, dataset_id)
         return "upload", "データを削除しました。", "success"
+
+    if action == "refresh_db_dataset":
+        dataset_id = int(form.getfirst("dataset_id", "0"))
+        row_count = refresh_db_dataset(conn, dataset_id)
+        return "upload", "DBデータを更新しました。{0} 行取得しました。".format(row_count), "success"
 
     if action == "create_relation":
         left_field_id = int(form.getfirst("left_field_id", "0"))
