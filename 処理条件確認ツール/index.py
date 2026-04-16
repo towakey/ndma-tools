@@ -16,6 +16,12 @@ except ImportError:
 import cgi
 import cgitb
 
+# 同期処理をインポート
+try:
+    from sync_latest_data import sync_latest_data
+except ImportError:
+    sync_latest_data = None
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "db_config.json")
 DEFAULT_SOURCE_TABLE = "source_processing"
@@ -338,6 +344,10 @@ def render_html(rows, message):
     print("<main>")
     print("<div class=\"card\">")
     print(f"<div class=\"message\">{html.escape(message)}</div>")
+    print("<form method=\"post\" style=\"margin:0 0 16px\">")
+    print("<input type=\"hidden\" name=\"action\" value=\"sync\">")
+    print("<button class=\"btn\" type=\"submit\">最新処理日時を更新</button>")
+    print("</form>")
     print("<table>")
     print("<thead><tr><th>装置名</th><th>処理条件名</th><th>最新処理日時</th><th>確認日時</th><th>確認</th></tr></thead>")
     print("<tbody>")
@@ -347,6 +357,13 @@ def render_html(rows, message):
             safe_condition = html.escape(condition_name)
             safe_latest = html.escape(latest_processed_at)
             safe_confirmed = html.escape(confirmed_at)
+            confirm_message = (
+                f"装置名: {device_name}\\n"
+                f"処理条件名: {condition_name}\\n"
+                f"最新処理日時: {latest_processed_at}\\n"
+                "確認日時を登録しますか？"
+            )
+            confirm_payload = json.dumps(confirm_message, ensure_ascii=False)
             latest_dt = parse_dt(latest_processed_at)
             confirmed_dt = parse_dt(confirmed_at)
             row_class = ""
@@ -358,7 +375,7 @@ def render_html(rows, message):
             print(f"<td>{safe_latest}</td>")
             print(f"<td>{safe_confirmed}</td>")
             print("<td>")
-            print("<form method=\"post\" style=\"margin:0\">")
+            print(f"<form method=\"post\" style=\"margin:0\" onsubmit='return confirm({confirm_payload});'>")
             print("<input type=\"hidden\" name=\"action\" value=\"confirm\">")
             print(f"<input type=\"hidden\" name=\"device_name\" value=\"{safe_device}\">")
             print(f"<input type=\"hidden\" name=\"condition_name\" value=\"{safe_condition}\">")
@@ -393,30 +410,43 @@ def main():
     device_name = form.getfirst("device_name", "")
     condition_name = form.getfirst("condition_name", "")
 
-    message = "最新処理日時を取得しています。"
+    message = "一覧を表示しています。必要に応じて最新処理日時を更新してください。"
 
     config = load_config()
-    source_conn = get_source_connection(config)
     local_conn = get_sqlite_connection(config["local_path"])
+    source_conn = None
     try:
-        init_db(
-            source_conn,
-            source_table=config["source_table"],
-            should_seed_sample=config["seed_sample_data"],
-            connect_db=config["connect_db"],
-        )
-
         init_db(local_conn, local_table=config["local_table"])
+
         if action == "confirm" and device_name and condition_name:
             update_confirmed_at(local_conn, device_name, condition_name, config["local_table"])
             message = f"{device_name} / {condition_name} の確認日時を更新しました。"
 
-        latest_rows = fetch_latest_source(source_conn, config["source_table"])
-        upsert_local(local_conn, latest_rows, config["local_table"])
+        if action == "sync":
+            if sync_latest_data:
+                success = sync_latest_data()
+                if success:
+                    message = "最新処理日時を更新しました。"
+                else:
+                    message = "同期処理でエラーが発生しました。"
+            else:
+                # フォールバック：直接呼び出し
+                source_conn = get_source_connection(config)
+                init_db(
+                    source_conn,
+                    source_table=config["source_table"],
+                    should_seed_sample=config["seed_sample_data"],
+                    connect_db=config["connect_db"],
+                )
+                latest_rows = fetch_latest_source(source_conn, config["source_table"])
+                upsert_local(local_conn, latest_rows, config["local_table"])
+                message = "最新処理日時を更新しました。"
+
         local_rows = fetch_local_sorted(local_conn, config["local_table"])
 
     finally:
-        source_conn.close()
+        if source_conn is not None:
+            source_conn.close()
         local_conn.close()
 
     render_html(local_rows, message)
