@@ -10,6 +10,9 @@
     "path": "local.db",
     "table": "local_processing"
   },
+  "display": {
+    "threshold_days": 180
+  },
   "runtime": {
     "python_executable": "C:/Path/To/Python/python.exe"
   },
