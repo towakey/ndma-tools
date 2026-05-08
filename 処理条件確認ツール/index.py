@@ -27,6 +27,7 @@ CONFIG_PATH = os.path.join(BASE_DIR, "db_config.json")
 DEFAULT_SOURCE_TABLE = "source_processing"
 DEFAULT_LOCAL_TABLE = "local_processing"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+DEFAULT_THRESHOLD_DAYS = 180
 
 
 def now_str():
@@ -110,6 +111,9 @@ def load_config():
 
     postgresql_config = config.get("db", {}) if isinstance(config.get("db"), dict) else {}
 
+    display_config = config.get("display", {})
+    threshold_days = int(display_config.get("threshold_days", DEFAULT_THRESHOLD_DAYS))
+
     return {
         "connect_db": connect_db,
         "source_path": os.path.join(BASE_DIR, source_path),
@@ -118,6 +122,7 @@ def load_config():
         "local_table": local_table,
         "seed_sample_data": bool(source_config.get("seed_sample_data", True)),
         "postgresql": postgresql_config,
+        "threshold_days": threshold_days,
     }
 
 
@@ -233,19 +238,22 @@ def update_confirmed_at(conn, device_name, condition_name, local_table):
     conn.commit()
 
 
-def fetch_local_sorted(conn, local_table):
+def fetch_local_sorted(conn, local_table, threshold_days=DEFAULT_THRESHOLD_DAYS):
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=threshold_days)).strftime(DATE_FORMAT)
     cursor = conn.cursor()
     cursor.execute(
         f"""
         SELECT device_name, condition_name, latest_processed_at, confirmed_at
         FROM {local_table}
+        WHERE confirmed_at <= ?
         ORDER BY device_name ASC, condition_name ASC
-        """
+        """,
+        (cutoff,),
     )
     return cursor.fetchall()
 
 
-def render_html(rows, message):
+def render_html(rows, message, threshold_days=DEFAULT_THRESHOLD_DAYS):
     print("Content-Type: text/html; charset=utf-8\n")
     print("<!DOCTYPE html>")
     print("<html lang=\"ja\">")
@@ -344,6 +352,7 @@ def render_html(rows, message):
     print("<main>")
     print("<div class=\"card\">")
     print(f"<div class=\"message\">{html.escape(message)}</div>")
+    print(f"<div class=\"message\">確認日時が {threshold_days} 日以上前のレコードのみ表示しています。</div>")
     print("<form method=\"post\" style=\"margin:0 0 16px\">")
     print("<input type=\"hidden\" name=\"action\" value=\"sync\">")
     print("<button class=\"btn\" type=\"submit\">最新処理日時を更新</button>")
@@ -413,6 +422,7 @@ def main():
     message = "一覧を表示しています。必要に応じて最新処理日時を更新してください。"
 
     config = load_config()
+    threshold_days = config["threshold_days"]
     local_conn = get_sqlite_connection(config["local_path"])
     source_conn = None
     try:
@@ -442,14 +452,14 @@ def main():
                 upsert_local(local_conn, latest_rows, config["local_table"])
                 message = "最新処理日時を更新しました。"
 
-        local_rows = fetch_local_sorted(local_conn, config["local_table"])
+        local_rows = fetch_local_sorted(local_conn, config["local_table"], threshold_days)
 
     finally:
         if source_conn is not None:
             source_conn.close()
         local_conn.close()
 
-    render_html(local_rows, message)
+    render_html(local_rows, message, threshold_days)
 
 
 def run():
